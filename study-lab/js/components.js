@@ -24,9 +24,161 @@
     const diff = ['', 'Easier', 'Standard', 'Hard'][q.difficulty] || '';
     const src = q.source === 'ai' ? '<span class="chip warn" title="Made by AI – double-check it">AI-made</span>'
       : q.source === 'import' ? '<span class="chip">Imported</span>' : q.source === 'mine' ? '<span class="chip">Mine</span>' : '';
+    const extraSpecs = (q.specs || []).filter((k) => k !== q.spec && Bank.specInfo(k));
     return `<span class="chip blue">${U.esc(U.moduleShort(q.module))}</span>
-      ${info ? `<a class="chip" href="#/bank/${q.module}?spec=${encodeURIComponent(q.spec)}" title="${U.esc(info.point.text)}">${U.esc(q.spec)} · ${U.esc(info.point.title)}</a>` : ''}
+      ${info ? `<a class="chip" href="#/bank/${q.module}?spec=${encodeURIComponent(q.spec)}" title="${U.esc(info.point.text)}">${U.esc(Bank.specLabel(q.spec))} · ${U.esc(info.point.title)}</a>` : ''}
+      ${extraSpecs.map((k) => `<a class="chip" href="#/bank/${Bank.specInfo(k).module}?spec=${encodeURIComponent(k)}" title="also tests: ${U.esc(Bank.specInfo(k).point.text)}">+ ${U.esc(Bank.specLabel(k))}</a>`).join('')}
+      ${q.type === 'written' ? `<span class="chip">${q.marks} mark${q.marks === 1 ? '' : 's'}</span>` : ''}
       ${diff ? `<span class="chip">${diff}</span>` : ''}${src}${q.edited ? '<span class="chip">Edited</span>' : ''}${q.verified === false ? '<span class="chip bad" title="The AI checker disagreed with this answer">Unverified</span>' : ''}${extra}`;
+  };
+
+  /* ---------------- mark schemes ----------------
+     A mark scheme is Markdown. Lines that contain bold mark codes – **M1**, **dM1**, **A1**, **A1ft**,
+     **B1**, **B2**, **E1** (several per line allowed, e.g. **M1 A1**) – each become one tickable row.
+     Other lines (e.g. "**(a)**" or notes) are shown as labels. */
+  const CODE_RE = /(?<![A-Za-z])(?:d|D)?([MABEC])(\d)(?!\d)/g;
+  C.parseMarkScheme = (md) => {
+    const items = [];
+    let total = 0;
+    for (const raw of String(md || '').split('\n')) {
+      const line = raw.replace(/^\s*[-*•]\s+/, '').trim();
+      if (!line) continue;
+      let marks = 0;
+      const bolds = [...line.matchAll(/\*\*([^*]+)\*\*/g)].map((m) => m[1]);
+      const codes = [];
+      for (const b of bolds) for (const m of b.matchAll(CODE_RE)) { marks += parseInt(m[2], 10); codes.push(m[0].trim()); }
+      if (marks) { items.push({ text: line, marks, codes }); total += marks; }
+      else items.push({ text: line, marks: 0, label: true });
+    }
+    return { items, total };
+  };
+
+  /* C.markPanel(container, q, {getAnswer: () => ({text, images}), onSave(score, max, by, feedback), initial})
+     Lets you mark a written answer yourself against the scheme, or have the AI mark it. */
+  C.markPanel = (container, q, opts) => {
+    const ms = C.parseMarkScheme(q.markScheme);
+    const max = q.marks || ms.total;
+    const root = U.html(`<div class="markpanel">
+      <div class="row between" style="margin-bottom:8px"><h3 style="margin:0">Mark scheme <span class="muted" style="font-weight:500">(${max} marks)</span></h3>
+        <div class="row"><button class="btn sm primary" data-ms-ai>✦ Mark with AI</button></div></div>
+      <div class="mark-out hidden" data-ai-out style="margin-bottom:12px"><div class="rich"></div></div>
+      <div class="ms-list" data-ms></div>
+      <div class="row between" style="margin-top:10px">
+        <span class="muted" style="font-size:13px">Tick each mark you earned (M = method, A = accuracy, B = independent mark; an A mark normally needs its M mark).</span>
+        <span class="row"><b data-total style="font-size:1.15rem">0/${max}</b><button class="btn sm good" data-ms-save>Save mark</button></span>
+      </div>
+    </div>`);
+    container.appendChild(root);
+    const list = U.$('[data-ms]', root);
+    const awards = ms.items.map(() => 0);
+    list.innerHTML = ms.items.map((it, i) => it.label
+      ? `<div class="ms-label rich">${U.mdInline(it.text)}</div>`
+      : `<label class="ms-row"><span class="ms-ctl">${it.marks > 1
+          ? `<select data-i="${i}">${Array.from({ length: it.marks + 1 }, (_, k) => `<option value="${k}">${k}</option>`).join('')}</select>`
+          : `<input type="checkbox" data-i="${i}">`}</span><span class="rich">${U.mdInline(it.text)}</span></label>`).join('') ||
+      `<div class="rich">${U.md(q.markScheme || '_No mark scheme – use the solution below and enter your mark._')}</div>`;
+    const totalEl = U.$('[data-total]', root);
+    let manual = null; // when the scheme has no tickable rows, type a score
+    if (!ms.items.some((it) => !it.label)) {
+      manual = U.html(`<input type="number" min="0" max="${max}" value="0" style="width:80px">`);
+      totalEl.replaceWith(manual);
+    }
+    const score = () => manual ? U.clamp(parseFloat(manual.value) || 0, 0, max) : Math.min(max, awards.reduce((a, b) => a + b, 0));
+    const refresh = () => { if (!manual) totalEl.textContent = `${score()}/${max}`; };
+    list.addEventListener('change', (e) => {
+      const i = e.target.dataset.i;
+      if (i == null) return;
+      awards[i] = e.target.type === 'checkbox' ? (e.target.checked ? ms.items[i].marks : 0) : parseInt(e.target.value, 10);
+      refresh();
+    });
+    const setAwards = (arr) => {
+      let k = 0;
+      ms.items.forEach((it, i) => {
+        if (it.label) return;
+        const v = U.clamp(Math.round(arr[k++] || 0), 0, it.marks);
+        awards[i] = v;
+        const ctl = U.$(`[data-i="${i}"]`, list);
+        if (ctl.type === 'checkbox') ctl.checked = v > 0; else ctl.value = String(v);
+      });
+      refresh();
+    };
+    let lastFeedback = '', by = 'self';
+    U.$('[data-ms-save]', root).onclick = () => { opts.onSave(score(), max, by, lastFeedback); U.toast(`Saved ${score()}/${max}`, 'good'); };
+    const aiBtn = U.$('[data-ms-ai]', root);
+    aiBtn.onclick = async () => {
+      if (!AI.isConfigured()) return C.needAI();
+      const ans = opts.getAnswer();
+      if (!ans.text.trim() && !ans.images.length) return U.toast('Write your answer (or add a photo of it) first');
+      const box = U.$('[data-ai-out]', root), out = U.$('.rich', box);
+      box.classList.remove('hidden'); out.innerHTML = '<p class="muted typing">Marking against the mark scheme</p>';
+      aiBtn.disabled = true;
+      try {
+        const full = AI.clean(await AI.chat({
+          system: AI.prompts.markWritten(q, ms), effort: 'high',
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'My answer:\n' + (ans.text.trim() || '(see the attached photo(s) of my working)') }].concat(ans.images.map((d) => ({ type: 'image', dataUrl: d }))) }],
+          onToken: (t, all) => { out.innerHTML = U.md(AI.clean(all).replace(/^AWARDS:.*$/m, '')); },
+        }));
+        out.innerHTML = U.md(full.replace(/^AWARDS:.*$/m, ''));
+        lastFeedback = full;
+        const aw = /AWARDS\s*:\s*([\d,\s]+)/i.exec(full);
+        const tickable = ms.items.filter((it) => !it.label).length;
+        if (aw) {
+          const arr = aw[1].split(/[,\s]+/).filter(Boolean).map(Number);
+          if (arr.length === tickable) setAwards(arr);
+        }
+        const sc = AI.parseScore(full);
+        if (sc && manual) manual.value = String(sc.got);
+        if (sc) { by = 'ai'; opts.onSave(Math.min(max, sc.got), max, 'ai', full); U.toast(`AI mark saved: ${Math.min(max, sc.got)}/${max} – adjust the ticks and Save if you disagree`, 'good'); }
+      } catch (e) { out.innerHTML = U.md('**Error:** ' + e.message); }
+      aiBtn.disabled = false;
+    };
+    if (opts.initial) {
+      if (opts.initial.feedback) { const box = U.$('[data-ai-out]', root); box.classList.remove('hidden'); U.$('.rich', box).innerHTML = U.md(opts.initial.feedback.replace(/^AWARDS:.*$/m, '')); }
+    }
+    refresh();
+    return { root };
+  };
+
+  // Answer box for written questions: text + photos (+ optional scratchpad image supplier)
+  C.answerBox = (container, opts = {}) => {
+    const root = U.html(`<div class="answer-box">
+      <textarea data-ans rows="8" placeholder="Write your answer and working here. Maths: plain text is fine (x^2, sqrt(3), 1/2), or LaTeX in $…$. You can also add photos of your written working."></textarea>
+      <div class="row" style="margin-top:8px"><label class="btn sm">📷 Add photo of working<input type="file" accept="image/*" multiple hidden data-photo></label>
+        ${opts.board ? '<label class="check" style="font-size:13px"><input type="checkbox" data-useboard checked> include my scratchpad</label>' : ''}
+        <div class="thumbs" data-thumbs></div><span class="spacer"></span><span class="muted" style="font-size:12px" data-preview-toggle></span></div>
+    </div>`);
+    container.appendChild(root);
+    const ta = U.$('[data-ans]', root);
+    ta.value = opts.text || '';
+    const images = (opts.images || []).slice();
+    const thumbs = U.$('[data-thumbs]', root);
+    const draw = () => {
+      thumbs.innerHTML = '';
+      images.forEach((src, i) => {
+        const t = U.html(`<div class="t"><img src="${src}"><button title="Remove">✕</button></div>`);
+        U.$('button', t).onclick = () => { images.splice(i, 1); draw(); opts.onChange && opts.onChange(); };
+        thumbs.appendChild(t);
+      });
+    };
+    draw();
+    U.$('[data-photo]', root).onchange = async (e) => {
+      for (const f of e.target.files) images.push(await U.shrinkImage(await U.readFile(f, 'dataurl'), 1600, 0.85));
+      e.target.value = ''; draw(); opts.onChange && opts.onChange();
+    };
+    ta.addEventListener('keydown', (e) => e.stopPropagation());
+    ta.addEventListener('input', () => opts.onChange && opts.onChange());
+    return {
+      root,
+      get: () => {
+        const imgs = images.slice();
+        const ub = U.$('[data-useboard]', root);
+        if (opts.board && (!ub || ub.checked)) { const b = opts.board(); if (b) imgs.push(b); }
+        return { text: ta.value, images: imgs };
+      },
+      text: () => ta.value,
+      images: () => images.slice(),
+      focus: () => ta.focus(),
+    };
   };
 
   C.needAI = () => {
@@ -228,43 +380,74 @@
   };
 
   /* ---------------- question editor (fix a question / write your own) ---------------- */
-  C.editQuestion = (q, onSave) => {
+  C.specOptionsHTML = (selected, onlyUnits) => Courses.all().map((c) => c.units.filter((u) => !onlyUnits || onlyUnits.includes(u.id)).map((u) =>
+    `<optgroup label="${U.esc((c.kind === 'esat' ? 'ESAT ' : c.short + ' ') + u.short + ' – ' + u.name)}">${u.sections.map((s) => s.points.map((p) =>
+      `<option value="${U.esc(p.key)}" ${p.key === selected ? 'selected' : ''}>${U.esc(Courses.label(p.key))} ${U.esc(p.title)}</option>`).join('')).join('')}</optgroup>`).join('')).join('');
+
+  C.editQuestion = (q, onSave, opts = {}) => {
     const isNew = !q;
-    q = q || { module: Store.profile()?.modules?.[0] || 'maths1', spec: '', difficulty: 2, stem: '', options: ['', '', '', '', ''], answer: 0, solution: '' };
-    const specOpts = window.ESAT_SPEC.map((m) => `<optgroup label="${U.esc(m.name)}">${m.sections.map((s) => s.points.map((p) =>
-      `<option value="${p.code}" ${p.code === q.spec ? 'selected' : ''}>${p.code} ${U.esc(p.title)}</option>`).join('')).join('')}</optgroup>`).join('');
+    const firstUnit = Store.studyUnits(['current'])[0] || Store.studyUnits(['done'])[0] || 'maths1';
+    const defaultSpec = (Courses.points(firstUnit)[0] || {}).key || 'M1.1';
+    q = q || { type: opts.type || (Courses.unit(firstUnit) && Courses.unit(firstUnit).course !== 'esat' ? 'written' : 'mcq'), spec: defaultSpec, difficulty: 2, stem: '', options: ['', '', '', '', ''], answer: 0, solution: '', markScheme: '', marks: 0 };
+    let type = q.type || 'mcq';
     const body = U.html(`<div>
+      ${isNew ? `<div class="field"><label>Type</label><div class="seg" data-type><button data-v="written">Written answer (A-level style)</button><button data-v="mcq">Multiple choice (ESAT style)</button></div></div>` : ''}
       <div class="grid c2">
-        <div class="field"><label>Spec point</label><select data-f="spec">${specOpts}</select></div>
+        <div class="field"><label>Spec point</label><select data-f="spec">${C.specOptionsHTML(q.spec)}</select></div>
         <div class="field"><label>Difficulty</label><select data-f="difficulty">
           <option value="1" ${q.difficulty === 1 ? 'selected' : ''}>Easier</option><option value="2" ${q.difficulty === 2 ? 'selected' : ''}>Standard</option><option value="3" ${q.difficulty === 3 ? 'selected' : ''}>Hard</option></select></div>
       </div>
-      <div class="field"><label>Question <span class="hint">Markdown + LaTeX in $…$</span></label><textarea data-f="stem" rows="5">${U.esc(q.stem)}</textarea></div>
-      <div class="field"><label>Options <span class="hint">one per line (A, B, C… in order)</span></label><textarea data-f="options" rows="6">${U.esc(q.options.join('\n'))}</textarea></div>
-      <div class="field"><label>Correct option</label><input type="text" data-f="answer" value="${U.letter(q.answer)}" maxlength="1" style="width:70px"></div>
-      <div class="field"><label>Worked solution</label><textarea data-f="solution" rows="6">${U.esc(q.solution)}</textarea></div>
+      <div class="field"><label>Question <span class="hint">Markdown + LaTeX in $…$. For written questions show marks per part like **(3)**.</span></label><textarea data-f="stem" rows="6">${U.esc(q.stem)}</textarea></div>
+      <div data-mcq>
+        <div class="field"><label>Options <span class="hint">one per line (A, B, C… in order)</span></label><textarea data-f="options" rows="6">${U.esc((q.options || []).join('\n'))}</textarea></div>
+        <div class="field"><label>Correct option</label><input type="text" data-f="answer" value="${U.letter(q.answer || 0)}" maxlength="1" style="width:70px"></div>
+      </div>
+      <div data-written>
+        <div class="field"><label>Mark scheme <span class="hint">one mark per line, e.g. "- **M1** resolves vertically", "- **A1** T = 12 N", "- **B2** …"; group with "**(a)**". Total is counted automatically.</span></label><textarea data-f="markScheme" rows="8">${U.esc(q.markScheme || '')}</textarea>
+          <span class="hint" data-mstotal></span></div>
+      </div>
+      <div class="field"><label>Worked solution</label><textarea data-f="solution" rows="6">${U.esc(q.solution || '')}</textarea></div>
       <div class="field"><label>Preview</label><div class="qpreview" data-preview></div></div>
     </div>`);
-    const get = () => ({
-      spec: U.$('[data-f=spec]', body).value,
-      difficulty: parseInt(U.$('[data-f=difficulty]', body).value, 10),
-      stem: U.$('[data-f=stem]', body).value.trim(),
-      options: U.$('[data-f=options]', body).value.split('\n').map((s) => s.trim()).filter(Boolean),
-      answer: U.letterIndex(U.$('[data-f=answer]', body).value),
-      solution: U.$('[data-f=solution]', body).value.trim(),
-    });
+    const showType = () => {
+      U.$('[data-mcq]', body).style.display = type === 'mcq' ? '' : 'none';
+      U.$('[data-written]', body).style.display = type === 'written' ? '' : 'none';
+      U.$$('[data-type] button', body).forEach((b) => b.classList.toggle('on', b.dataset.v === type));
+    };
+    U.$$('[data-type] button', body).forEach((b) => b.onclick = () => { type = b.dataset.v; showType(); preview(); });
+    const get = () => {
+      const v = {
+        type,
+        spec: U.$('[data-f=spec]', body).value,
+        difficulty: parseInt(U.$('[data-f=difficulty]', body).value, 10),
+        stem: U.$('[data-f=stem]', body).value.trim(),
+        solution: U.$('[data-f=solution]', body).value.trim(),
+      };
+      if (type === 'mcq') {
+        v.options = U.$('[data-f=options]', body).value.split('\n').map((x) => x.trim()).filter(Boolean);
+        v.answer = U.letterIndex(U.$('[data-f=answer]', body).value);
+      } else {
+        v.markScheme = U.$('[data-f=markScheme]', body).value.trim();
+        v.marks = C.parseMarkScheme(v.markScheme).total;
+      }
+      return v;
+    };
     const preview = () => {
       const v = get();
-      U.$('[data-preview]', body).innerHTML = C.stemHTML(v) + C.optionsHTML(v, { revealed: true, choice: -1 }) + `<div class="solution rich">${U.md(v.solution)}</div>`;
+      if (type === 'written') U.$('[data-mstotal]', body).textContent = `Counted ${v.marks} mark${v.marks === 1 ? '' : 's'} in the scheme.`;
+      U.$('[data-preview]', body).innerHTML = C.stemHTML(v) + (type === 'mcq' ? C.optionsHTML(v, { revealed: true, choice: -1 })
+        : `<h4>Mark scheme</h4><div class="rich">${U.md(v.markScheme)}</div>`) + `<div class="solution rich">${U.md(v.solution)}</div>`;
     };
     body.addEventListener('input', U.debounce(preview, 300));
     body.addEventListener('keydown', (e) => e.stopPropagation());
-    preview();
+    showType(); preview();
     U.modal({
       title: isNew ? 'Write a question' : 'Edit question', body, wide: true, sticky: true,
       buttons: [{ label: 'Cancel' }, { label: 'Save', kind: 'primary', onClick: () => {
         const v = get();
-        if (!v.stem || v.options.length < 2 || v.answer < 0 || v.answer >= v.options.length) { U.toast('Needs a question, at least 2 options and a valid answer letter', 'bad'); return false; }
+        if (!v.stem) { U.toast('The question needs some text', 'bad'); return false; }
+        if (type === 'mcq' && (v.options.length < 2 || v.answer < 0 || v.answer >= v.options.length)) { U.toast('Needs at least 2 options and a valid answer letter', 'bad'); return false; }
+        if (type === 'written' && !v.marks) { U.toast('Add a mark scheme with at least one mark code like **M1** or **B1**', 'bad'); return false; }
         v.module = Bank.specInfo(v.spec).module;
         onSave(v);
       } }],

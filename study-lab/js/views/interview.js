@@ -17,10 +17,14 @@
   let live = null; // current interview config/state (kept in memory while you navigate)
 
   function defaultSubject() {
-    const m = Store.profile().modules;
+    const units = Store.studyUnits(['current', 'done']);
+    const courses = new Set(units.map((u) => Courses.unit(u).course));
+    const m = Store.esatModules();
     if (m.includes('physics') && m.includes('maths2')) return 'engineering';
     if (m.includes('biology')) return 'biology';
-    if (m.includes('chemistry')) return 'chemistry';
+    if (courses.has('ial-maths')) return 'maths';
+    if (courses.has('ial-physics')) return 'physics';
+    if (m.includes('chemistry') || courses.has('ial-chemistry')) return 'chemistry';
     return 'maths';
   }
 

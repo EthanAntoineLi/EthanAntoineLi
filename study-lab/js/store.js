@@ -23,16 +23,69 @@
   const DEFAULT_SETTINGS = {
     theme: 'auto',
     ai: { provider: 'openai', baseUrl: '', apiKey: '', model: '', vision: true, useProxy: false },
-    practice: { mode: 'relaxed', shuffleOptions: false, autoAdvance: false },
+    practice: { mode: 'relaxed', shuffleOptions: false, autoAdvance: false, autoStatus: true },
     speech: { tts: true, voice: '' },
     review: { confirmAfterDays: 3 },
   };
 
   const S = {
-    KEYS: ['profile', 'settings', 'attempts', 'review', 'mocks', 'custom', 'hidden', 'interviews', 'challenges', 'cutoffs', 'active', 'edits'],
+    KEYS: ['profile', 'settings', 'attempts', 'review', 'mocks', 'custom', 'hidden', 'interviews', 'challenges', 'cutoffs', 'active', 'edits', 'specStatus', 'customCourses', 'courseOverrides'],
 
     profile() { return load('profile', null); },
-    setProfile(p) { save('profile', p); },
+    setProfile(p) { save('profile', p); if (window.Courses) Courses.invalidate(); },
+
+    /* What you study. ESAT modules (if doing the ESAT) + A-level units by status:
+       'current' (studying now), 'done' (finished, keep reviewing), 'later'. */
+    esatOn() { const p = S.profile(); return !!(p && p.esat !== false && (p.modules || []).length); },
+    esatModules() { const p = S.profile(); return S.esatOn() ? p.modules.slice() : []; },
+    unitStatus(id) {
+      const p = S.profile();
+      if (!p) return null;
+      if ((p.modules || []).includes(id)) return S.esatOn() ? 'current' : null;
+      return (p.units || {})[id] || null;
+    },
+    // statuses: array of statuses to include, default current + done
+    studyUnits(statuses = ['current', 'done']) {
+      const p = S.profile();
+      if (!p) return [];
+      const out = statuses.includes('current') ? S.esatModules() : [];
+      for (const [id, st] of Object.entries(p.units || {})) if (statuses.includes(st) && window.Courses && Courses.unit(id)) out.push(id);
+      return out;
+    },
+    studyCourses() {
+      const ids = new Set(S.studyUnits(['current', 'done', 'later']).map((u) => Courses.unit(u) && Courses.unit(u).course));
+      return Courses.all().filter((c) => ids.has(c.id));
+    },
+
+    /* Spec-point tracker: key -> {s: 'learning'|'learned'|'shaky', at} */
+    specStatus() { return load('specStatus', {}); },
+    setSpecStatus(key, s) {
+      const all = S.specStatus();
+      if (!s) delete all[key]; else all[key] = { s, at: Date.now() };
+      save('specStatus', all);
+    },
+    setSpecStatusMany(keys, s) {
+      const all = S.specStatus();
+      keys.forEach((k) => { if (!s) delete all[k]; else all[k] = { s, at: Date.now() }; });
+      save('specStatus', all);
+    },
+    /* After a marked answer: 2+ attempts on a spec point averaging 80%+ (last 5) turn it green;
+       under 50% flags it as shaky. Whatever you set by hand stands until you answer on it again. */
+    autoStatus(spec) {
+      if (!spec || !window.Bank || !S.settings().practice.autoStatus) return;
+      const x = Bank.stats().spec[spec];
+      if (!x || x.n < 2 || x.recentAcc == null) return;
+      const next = x.recentAcc >= 0.8 ? 'learned' : x.recentAcc < 0.5 ? 'shaky' : null;
+      const all = S.specStatus();
+      if (next && (all[spec] || {}).s !== next) { all[spec] = { s: next, at: Date.now(), auto: true }; save('specStatus', all); }
+    },
+
+    /* Your own courses, and edited copies of built-in ones */
+    customCourses() { return load('customCourses', []); },
+    saveCustomCourse(c) { const list = S.customCourses().filter((x) => x.id !== c.id); list.push(c); save('customCourses', list); Courses.invalidate(); },
+    deleteCustomCourse(id) { save('customCourses', S.customCourses().filter((x) => x.id !== id)); Courses.invalidate(); },
+    courseOverrides() { return load('courseOverrides', {}); },
+    saveCourseOverride(id, c) { const o = S.courseOverrides(); if (c) o[id] = c; else delete o[id]; save('courseOverrides', o); Courses.invalidate(); },
 
     settings() {
       const s = load('settings', null) || {};
@@ -51,9 +104,23 @@
     attempts() { return load('attempts', []); },
     addAttempt(a) {
       const list = S.attempts();
-      list.push(Object.assign({ at: Date.now() }, a));
+      const rec = Object.assign({ at: Date.now() }, a);
+      list.push(rec);
       save('attempts', list);
       S.updateReview(a.qid, a.correct, a.mode);
+      S.autoStatus(rec.spec);
+      return rec.at;
+    },
+    // re-marking a written answer changes the score of that attempt
+    updateAttempt(qid, at, patch) {
+      const list = S.attempts();
+      const a = list.find((x) => x.qid === qid && x.at === at);
+      if (!a) return;
+      const wasCorrect = a.correct;
+      Object.assign(a, patch);
+      save('attempts', list);
+      if (patch.correct != null && patch.correct !== wasCorrect) S.updateReview(qid, patch.correct, a.mode);
+      S.autoStatus(a.spec);
     },
     cutoffs() { return load('cutoffs', {}); },
     resetModule(module) { const c = S.cutoffs(); c[module] = Date.now(); save('cutoffs', c); },
@@ -128,7 +195,7 @@
       return data;
     },
     importAll(data, mode = 'replace') {
-      if (!data || data.app !== 'esat-practice') throw new Error('That file is not an ESAT Practice backup.');
+      if (!data || data.app !== 'esat-practice') throw new Error('That file is not a Study Lab backup.');
       for (const k of S.KEYS) {
         if (!(k in data) || data[k] == null) continue;
         if (mode === 'merge' && k === 'attempts') {
@@ -142,7 +209,7 @@
           save(k, Object.assign({}, data.settings, { ai: Object.assign({}, data.settings.ai, { apiKey: keep }) }));
         } else save(k, data[k]);
       }
-      Bank.invalidate();
+      Bank.invalidate(); if (window.Courses) Courses.invalidate();
     },
     wipe() {
       for (const k of S.KEYS) { delete mem[k]; try { localStorage.removeItem(P + k); } catch (e) {} }

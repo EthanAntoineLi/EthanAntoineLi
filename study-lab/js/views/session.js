@@ -1,41 +1,50 @@
-/* The question player. Used for topic practice, the review queue and mock modules.
-   Relaxed mode: timer counts up and can be paused, instant feedback with the worked solution.
-   Exam conditions: countdown at real ESAT pace (40 min per 27 questions), no pausing,
-   free navigation + flags, review screen, solutions at the end. */
+/* The question player. Used for topic practice, topic review, the mistakes queue and mock modules.
+   Two question types:
+   - multiple choice (ESAT): pick A–H; relaxed mode shows the answer at once, exam mode at the end.
+   - written (A-level): type your answer and/or add photos of your working, then mark it against the
+     mark scheme – tick the marks yourself or let the AI mark it.
+   Relaxed mode: timer counts up and can be paused, feedback straight after each question.
+   Exam conditions: countdown (ESAT pace 40 min per 27 questions; written questions 1.2 min per mark),
+   no pausing, free navigation + flags, review screen, marking/solutions at the end. */
 (function () {
-  const PACE = 2400 / 27; // ≈ 88.9 s per question
+  const PACE = 2400 / 27; // ≈ 88.9 s per ESAT question
+  const PER_MARK = 72; // s per mark (75 marks in 90 minutes)
 
   const Session = {};
+  // ESAT multiple choice at ESAT pace; A-level questions (incl. Section A multiple choice) at 72 s per mark
+  const target = (q) => (q.type === 'written' ? q.marks * PER_MARK : (Courses.course(q.course) || {}).kind === 'esat' ? PACE : PER_MARK);
 
   // Build and start a session. cfg: {kind, title, subtitle, qids, mode, timeLimit, returnTo, mock}
   Session.start = (cfg) => {
     if (!cfg.qids || !cfg.qids.length) { U.toast('No questions match that – try another topic or make some with the AI question maker.', 'bad'); return; }
     const mode = cfg.mode || 'relaxed';
+    const limit = cfg.qids.reduce((t, id) => { const q = Bank.byId(id); return t + (q ? target(q) : PACE); }, 0);
     const s = Object.assign({
       id: U.uid('s-'), kind: 'practice', mode,
-      timeLimit: mode === 'exam' ? Math.round(cfg.qids.length * PACE) : null,
-      i: 0, answers: {}, checked: {}, flags: {}, struck: {}, times: {}, elapsed: 0,
+      timeLimit: mode === 'exam' ? Math.round(limit) : null,
+      i: 0, answers: {}, written: {}, scores: {}, checked: {}, flags: {}, struck: {}, times: {}, elapsed: 0,
       startedAt: Date.now(), paused: false, finished: false, recorded: {}, returnTo: '#/bank',
     }, cfg);
+    const replace = s.replaceHistory;
+    delete s.replaceHistory;
     Store.setActive(s);
     // When started from a #/practice?… link, replace that history entry so Back doesn't start a new set.
-    if (cfg.replaceHistory) { delete s.replaceHistory; Store.setActive(s); location.replace('#/practice/run'); }
-    else U.go('#/practice/run');
+    if (replace) location.replace('#/practice/run'); else U.go('#/practice/run');
   };
 
   // Turn #/practice?module=…&spec=…&n=…&mode=… into a session.
   function fromParams(p) {
     const filter = {};
-    ['module', 'section', 'spec', 'only', 'source'].forEach((k) => { if (p[k]) filter[k] = p[k]; });
+    ['module', 'section', 'spec', 'only', 'source', 'type'].forEach((k) => { if (p[k]) filter[k] = p[k]; });
     if (p.specs) filter.specs = p.specs.split(',');
     if (p.modules) filter.modules = p.modules.split(',');
     const n = parseInt(p.n || '10', 10);
     const qids = p.ids ? p.ids.split(',').filter((id) => Bank.byId(id)) : Bank.pickPractice(filter, n);
     let title = 'Practice';
-    if (p.spec) title = `${p.spec} · ${Bank.specTitle(p.spec)}`;
-    else if (p.section) { const s = Bank.sectionOf(p.section + '.1'); title = s ? `${p.section} · ${s.title}` : p.section; }
+    if (p.title) title = p.title;
+    else if (p.spec) title = `${Bank.specLabel(p.spec)} · ${Bank.specTitle(p.spec)}`;
+    else if (p.section) { const s = Courses.section(p.section); title = s ? `${U.moduleShort(s.unit)} ${s.code} · ${s.title}` : p.section; }
     else if (p.module) title = U.moduleName(p.module);
-    else if (p.title) title = p.title;
     const mode = p.mode || Store.settings().practice.mode;
     Session.start({ kind: 'practice', title, subtitle: mode === 'exam' ? 'Exam conditions' : 'Relaxed practice', qids, mode, replaceHistory: true, returnTo: p.back ? decodeURIComponent(p.back) : (p.module ? '#/bank/' + p.module : '#/bank') });
   }
@@ -47,9 +56,13 @@
     return run(el, s);
   };
 
+  // photos for written answers live in memory only (too big for browser storage)
+  const photoStore = {};
+
   function run(el, s) {
     document.body.classList.add('exam-mode');
     const exam = s.mode === 'exam';
+    s.written = s.written || {}; s.scores = s.scores || {};
     const qs = s.qids.map((id) => Bank.byId(id)).filter(Boolean);
     if (qs.length !== s.qids.length) s.qids = qs.map((q) => q.id);
     if (!qs.length) {
@@ -59,10 +72,12 @@
       return;
     }
     s.i = U.clamp(s.i || 0, 0, qs.length - 1);
+    const photos = photoStore[s.id] || (photoStore[s.id] = {});
     let showingReview = false; // exam review screen
     let sideTab = null; // 'board' | 'tutor' | 'nav'
-    let board = null, tutor = null, tutorFor = null;
+    let board = null, tutor = null, tutorFor = null, answerBox = null;
     s.lastTick = Date.now();
+    const hasWritten = qs.some((q) => q.type === 'written');
 
     el.innerHTML = `<div class="session">
       <div class="ses-top">
@@ -81,6 +96,7 @@
       </div>
       <div class="ses-bottom" data-bottom></div>
     </div>`;
+    const root = U.$('.session', el);
     const main = U.$('[data-main]', el), bottom = U.$('[data-bottom]', el), side = U.$('[data-sidepanel]', el);
     side.innerHTML = '<div class="pane-host" data-pane="nav"></div><div class="pane-host" data-pane="board"></div><div class="pane-host" data-pane="tutor"></div>';
     const paneNav = U.$('[data-pane=nav]', side), paneBoard = U.$('[data-pane=board]', side), paneTutor = U.$('[data-pane=tutor]', side);
@@ -88,24 +104,29 @@
 
     const save = () => Store.setActive(s);
     const cur = () => qs[s.i];
+    const isW = (q) => q.type === 'written';
+    const answered = (q) => (isW(q) ? !!((s.written[q.id] || '').trim() || (photos[q.id] || []).length) : s.answers[q.id] != null);
+    const boardImage = () => (board && !board.isEmpty() ? board.toDataURL() : null);
 
     /* ---------------- rendering ---------------- */
     function renderQuestion() {
       showingReview = false;
+      answerBox = null;
       const q = cur();
       const revealed = !exam && s.checked[q.id];
-      const choice = s.answers[q.id];
       main.innerHTML = `
         <div class="q-head">
           <span class="q-num">Question ${s.i + 1}</span><span class="muted">of ${qs.length}</span>
+          ${isW(q) ? `<span class="chip">${q.marks} mark${q.marks === 1 ? '' : 's'} · aim ${U.fmtTime(q.marks * PER_MARK)}</span>` : ''}
           <span class="spacer"></span>
           <button class="btn sm flag-btn ${s.flags[q.id] ? 'on' : ''}" data-flag title="Flag for review (F)">⚑ ${s.flags[q.id] ? 'Flagged' : 'Flag'}</button>
         </div>
         ${exam ? '' : `<div class="row" style="margin:-4px 0 14px">${C.metaChips(q)}</div>`}
         ${C.stemHTML(q)}
-        ${C.optionsHTML(q, { choice, revealed, struck: s.struck[q.id] || [] })}
-        <p class="muted" style="font-size:12.5px;margin-top:10px">Tip: press <span class="kbd">A</span>–<span class="kbd">${U.letter(q.options.length - 1)}</span> to choose, right-click an option to cross it out.</p>
+        ${isW(q) ? '<div data-answer style="margin-top:16px"></div>' : C.optionsHTML(q, { choice: s.answers[q.id], revealed, struck: s.struck[q.id] || [] })}
+        ${isW(q) ? '' : `<p class="muted" style="font-size:12.5px;margin-top:10px">Tip: press <span class="kbd">A</span>–<span class="kbd">${U.letter(q.options.length - 1)}</span> to choose, right-click an option to cross it out.</p>`}
         <div data-sol></div>`;
+      if (isW(q)) renderAnswerArea(q, revealed);
       if (revealed) renderSolution();
       renderBottom();
       renderProgress();
@@ -114,11 +135,52 @@
       main.parentElement.scrollTop = 0; window.scrollTo(0, 0);
     }
 
+    function renderAnswerArea(q, revealed) {
+      const host = U.$('[data-answer]', main);
+      if (revealed) {
+        const txt = s.written[q.id] || '';
+        const ph = photos[q.id] || [];
+        host.innerHTML = `<div class="card" style="background:var(--panel-2)"><div class="row between"><b>Your answer</b><button class="btn sm ghost" data-reopen>Edit answer</button></div>
+          ${txt.trim() ? `<div class="rich" style="margin-top:8px;white-space:pre-wrap">${U.md(txt)}</div>` : '<p class="muted" style="margin:8px 0 0">(no typed answer)</p>'}
+          ${ph.length ? `<div class="thumbs" style="margin-top:8px">${ph.map((p) => `<div class="t"><img src="${p}"></div>`).join('')}</div>` : ''}</div>`;
+        return;
+      }
+      answerBox = C.answerBox(host, {
+        text: s.written[q.id] || '', images: photos[q.id] || [], board: boardImage,
+        onChange: U.debounce(() => {
+          if (!answerBox) return;
+          s.written[q.id] = answerBox.text(); photos[q.id] = answerBox.images(); save(); renderProgress();
+          if (sideTab === 'nav') renderNav();
+        }, 300),
+      });
+    }
+
     function renderSolution() {
       const q = cur();
+      const host = U.$('[data-sol]', main);
+      if (isW(q)) {
+        const sc = s.scores[q.id];
+        host.innerHTML = `<div class="solution">
+          ${sc ? `<div class="verdict ${sc.score / sc.max >= 0.7 ? 'good' : 'bad'}">${sc.score}/${sc.max} marks <span class="muted" style="font-size:14px;font-weight:500">· marked by ${sc.by === 'ai' ? 'AI' : 'you'} · ${U.fmtTime(s.times[q.id] || 0)} (aim ${U.fmtTime(q.marks * PER_MARK)})</span></div>`
+            : '<div class="notice" style="margin-bottom:12px">Now mark your answer: tick the marks you earned, or press <b>Mark with AI</b>. It counts towards your progress once saved.</div>'}
+          <div data-mark></div>
+          <details style="margin-top:14px" ${sc ? '' : 'open'}><summary><b>Worked solution</b></summary><div class="rich" style="margin-top:8px">${U.md(q.solution)}</div></details>
+          <div class="row" style="margin-top:14px">
+            <button class="btn sm" data-ai-explain>✦ Ask the AI tutor</button>
+            <span class="spacer"></span>
+            <button class="btn sm ghost" data-edit title="Fix a mistake in this question">✎ Edit question</button>
+            <button class="btn sm ghost" data-hide title="Remove from your bank">Hide</button>
+          </div></div>`;
+        C.markPanel(U.$('[data-mark]', host), q, {
+          getAnswer: () => ({ text: s.written[q.id] || '', images: (photos[q.id] || []).concat(boardImage() ? [boardImage()] : []) }),
+          initial: sc,
+          onSave: (score, max, by, feedback) => { saveScore(q, score, max, by, feedback); },
+        });
+        return;
+      }
       const choice = s.answers[q.id];
       const ok = choice === q.answer;
-      U.$('[data-sol]', main).innerHTML = `<div class="solution">
+      host.innerHTML = `<div class="solution">
         <div class="verdict ${ok ? 'good' : 'bad'}">${ok ? '✓ Correct' : choice == null ? '— Not answered' : '✗ Not quite'} <span class="muted" style="font-size:14px;font-weight:500">· answer ${U.letter(q.answer)} · ${U.fmtSecs(s.times[q.id] || 0)} (pace ≈ 89s)</span></div>
         <h3>Worked solution</h3>
         <div class="rich">${U.md(q.solution)}</div>
@@ -131,6 +193,22 @@
         </div></div>`;
     }
 
+    function saveScore(q, score, max, by, feedback) {
+      s.scores[q.id] = { score, max, by, feedback: feedback || (s.scores[q.id] && s.scores[q.id].feedback) || '' };
+      const patch = { score, max, correct: score / max >= 0.7, marker: by };
+      if (s.recorded[q.id]) Store.updateAttempt(q.id, s.recorded[q.id], patch);
+      else s.recorded[q.id] = Store.addAttempt(Object.assign({ qid: q.id, module: q.module, spec: q.spec, time: Math.round(s.times[q.id] || 0), mode: s.kind === 'review' ? 'review' : (exam ? 'exam' : 'practice') }, patch));
+      save();
+      renderProgress();
+      const v = U.$('.verdict', main) || null;
+      if (cur() === q && !exam) {
+        const box = U.$('[data-sol] .solution', main);
+        if (box && !v) box.insertAdjacentHTML('afterbegin', `<div class="verdict ${score / max >= 0.7 ? 'good' : 'bad'}">${score}/${max} marks</div>`);
+        else if (v) { v.className = `verdict ${score / max >= 0.7 ? 'good' : 'bad'}`; v.firstChild.textContent = `${score}/${max} marks `; }
+        const n = U.$('[data-sol] .notice', main); if (n) n.remove();
+      }
+    }
+
     function renderBottom() {
       const q = cur();
       if (exam) {
@@ -140,30 +218,34 @@
           <button class="btn primary" data-next>${s.i === qs.length - 1 ? 'Finish →' : 'Next →'}</button>`;
       } else {
         const checked = s.checked[q.id];
+        const checkLabel = isW(q) ? 'Submit answer' : 'Check answer';
         bottom.innerHTML = `<button class="btn" data-prev ${s.i === 0 ? 'disabled' : ''}>← Previous</button>
           <span class="spacer"></span>
           ${checked ? '' : '<button class="btn ghost" data-skip>Skip</button>'}
           ${checked ? `<button class="btn primary" data-next>${s.i === qs.length - 1 ? 'See results →' : 'Next →'}</button>`
-            : `<button class="btn primary" data-check ${s.answers[q.id] == null ? 'disabled' : ''}>Check answer</button>`}`;
+            : `<button class="btn primary" data-check ${!isW(q) && s.answers[q.id] == null ? 'disabled' : ''}>${checkLabel}</button>`}`;
       }
     }
 
     function renderProgress() {
-      const answered = qs.filter((q) => s.answers[q.id] != null).length;
       if (!exam) {
         const done = qs.filter((q) => s.checked[q.id]);
-        const right = done.filter((q) => s.answers[q.id] === q.answer).length;
-        progEl.textContent = `${done.length}/${qs.length} done · ${right} right`;
-      } else progEl.textContent = `${answered}/${qs.length} answered`;
+        const mcq = done.filter((q) => !isW(q));
+        const right = mcq.filter((q) => s.answers[q.id] === q.answer).length;
+        const w = done.filter((q) => isW(q) && s.scores[q.id]);
+        const got = w.reduce((t, q) => t + s.scores[q.id].score, 0), of = w.reduce((t, q) => t + s.scores[q.id].max, 0);
+        progEl.textContent = `${done.length}/${qs.length} done` + (mcq.length ? ` · ${right} right` : '') + (of ? ` · ${got}/${of} marks` : '');
+      } else progEl.textContent = `${qs.filter(answered).length}/${qs.length} answered`;
     }
 
     function renderReviewScreen() {
       showingReview = true;
-      const unanswered = qs.filter((q) => s.answers[q.id] == null).length;
+      answerBox = null;
+      const unanswered = qs.filter((q) => !answered(q)).length;
       const flagged = qs.filter((q) => s.flags[q.id]).length;
       main.innerHTML = `<h2>Review screen</h2>
-        <p class="muted">Click a question to go back to it. ${unanswered ? `<b>${unanswered} unanswered</b> – there's no negative marking, so guess rather than leave blanks.` : 'All questions answered.'} ${flagged ? `${flagged} flagged.` : ''}</p>
-        <div class="navgrid" style="max-width:640px">${qs.map((q, i) => `<button data-jump="${i}" class="${s.answers[q.id] != null ? 'ans' : ''} ${s.flags[q.id] ? 'flag' : ''}">${i + 1}</button>`).join('')}</div>
+        <p class="muted">Click a question to go back to it. ${unanswered ? `<b>${unanswered} unanswered</b>${hasWritten ? '' : " – there's no negative marking, so guess rather than leave blanks"}.` : 'All questions answered.'} ${flagged ? `${flagged} flagged.` : ''}</p>
+        <div class="navgrid" style="max-width:640px">${qs.map((q, i) => `<button data-jump="${i}" class="${answered(q) ? 'ans' : ''} ${s.flags[q.id] ? 'flag' : ''}">${i + 1}</button>`).join('')}</div>
         <div class="legend" style="margin-top:12px"><span><i style="background:var(--primary-soft);border-color:var(--primary)"></i>answered</span><span><i></i>unanswered</span><span><i style="background:var(--flag);border-radius:50%"></i>flagged</span></div>`;
       bottom.innerHTML = `<button class="btn" data-jump="${qs.length - 1}">← Back to questions</button><span class="spacer"></span>
         ${flagged ? '<button class="btn" data-review-flagged>Review flagged</button>' : ''}
@@ -176,8 +258,9 @@
         <div class="drawer-body"><div class="navgrid">${qs.map((q, i) => {
           const cls = [];
           if (i === s.i && !showingReview) cls.push('cur');
-          if (!exam && s.checked[q.id]) cls.push(s.answers[q.id] === q.answer ? 'right' : 'wrong');
-          else if (s.answers[q.id] != null) cls.push('ans');
+          if (!exam && s.checked[q.id] && !isW(q)) cls.push(s.answers[q.id] === q.answer ? 'right' : 'wrong');
+          else if (!exam && isW(q) && s.scores[q.id]) cls.push(s.scores[q.id].score / s.scores[q.id].max >= 0.7 ? 'right' : 'wrong');
+          else if (answered(q)) cls.push('ans');
           if (s.flags[q.id]) cls.push('flag');
           return `<button data-jump="${i}" class="${cls.join(' ')}">${i + 1}</button>`;
         }).join('')}</div>
@@ -192,7 +275,7 @@
       U.$$('[data-pane]', side).forEach((p) => p.classList.toggle('on', p.dataset.pane === tab));
       if (tab === 'nav') renderNav();
       if (tab === 'board' && !board) {
-        paneBoard.innerHTML = '<div class="drawer-head"><h3>Scratchpad</h3><span class="muted" style="font-size:12px">your erasable booklet</span><button class="btn ghost sm" data-side-close>✕</button></div><div style="flex:1;min-height:0" data-wb></div>';
+        paneBoard.innerHTML = '<div class="drawer-head"><h3>Scratchpad</h3><span class="muted" style="font-size:12px">your working – can be sent for marking</span><button class="btn ghost sm" data-side-close>✕</button></div><div style="flex:1;min-height:0" data-wb></div>';
         board = Whiteboard.create(U.$('[data-wb]', paneBoard));
       }
       if (tab === 'tutor') openTutor(false);
@@ -211,23 +294,29 @@
       paneTutor.innerHTML = '';
       tutorFor = key;
       let attachBoard = false;
+      const revealed = !!s.checked[q.id];
       tutor = C.chat(paneTutor, {
         title: 'AI tutor', botName: 'Tutor', onClose: closeSide, seed,
-        system: () => AI.prompts.tutor(q, { choice: s.answers[q.id], revealed: !!s.checked[q.id] }),
-        intro: s.checked[q.id] ? 'Ask about this question – the tutor has the worked solution.' : 'You haven\'t checked your answer yet, so the tutor will give hints rather than the answer.',
-        quick: s.checked[q.id] ? [
+        system: () => AI.prompts.tutor(q, { choice: s.answers[q.id], revealed, answer: isW(q) ? s.written[q.id] : null }),
+        intro: revealed ? 'Ask about this question – the tutor has the worked solution' + (isW(q) ? ' and mark scheme.' : '.') : 'You haven\'t submitted yet, so the tutor will give hints rather than the answer.',
+        quick: revealed ? (isW(q) ? [
+          { label: 'Explain the solution', text: 'Explain the worked solution step by step, simply.' },
+          { label: 'Why did I lose marks?', text: 'Look at my answer and explain exactly which marks I lost and why.' },
+          { label: 'Which earlier topics does this use?', text: 'Which earlier topics or units does this question rely on, and what should I revise from them?' },
+          { label: 'Similar question', text: 'Give me one similar exam-style question to try (with marks), but don\'t give the answer until I reply.' },
+        ] : [
           { label: 'Explain the solution', text: 'Explain the worked solution step by step, simply.' },
           { label: 'Where did I go wrong?', text: s.answers[q.id] === q.answer ? 'I got it right – is there a faster way?' : `I chose ${U.letter(s.answers[q.id] ?? 0)}. What mistake probably led me there?` },
           { label: 'Faster method', text: 'Show me the quickest no-calculator method for this, the way you would do it in 90 seconds.' },
           { label: 'Similar question', text: 'Give me one similar question to try (with options), but don\'t give the answer until I reply.' },
-        ] : [
+        ]) : [
           { label: 'Give me a hint', text: 'Give me a small hint to get started – do not give the answer.' },
           { label: 'What topic is this?', text: 'Which idea/technique is this testing? No answer please.' },
         ],
         extraImages: () => {
           if (!attachBoard) return [];
           attachBoard = false;
-          const img = board && board.toDataURL();
+          const img = boardImage();
           return img ? [img] : [];
         },
         toolsExtra: '<button class="btn sm" data-send-board title="Send your scratchpad drawing to the tutor">✎ Send scratchpad</button>',
@@ -242,7 +331,7 @@
     /* ---------------- actions ---------------- */
     function choose(i) {
       const q = cur();
-      if (showingReview || i < 0 || i >= q.options.length) return;
+      if (isW(q) || showingReview || i < 0 || i >= q.options.length) return;
       if (!exam && s.checked[q.id]) return;
       s.answers[q.id] = i;
       const st = s.struck[q.id];
@@ -258,7 +347,7 @@
     }
     function strike(i) {
       const q = cur();
-      if (!exam && s.checked[q.id]) return;
+      if (isW(q) || (!exam && s.checked[q.id])) return;
       const st = new Set(s.struck[q.id] || []);
       st.has(i) ? st.delete(i) : st.add(i);
       s.struck[q.id] = [...st];
@@ -267,7 +356,15 @@
     }
     function check() {
       const q = cur();
-      if (exam || s.checked[q.id] || s.answers[q.id] == null) return;
+      if (exam || s.checked[q.id]) return;
+      if (isW(q)) {
+        if (answerBox) { s.written[q.id] = answerBox.text(); photos[q.id] = answerBox.images(); }
+        s.checked[q.id] = true;
+        save();
+        renderQuestion();
+        return;
+      }
+      if (s.answers[q.id] == null) return;
       s.checked[q.id] = true;
       record(q);
       save();
@@ -275,10 +372,12 @@
       if (Store.settings().practice.autoAdvance && s.answers[q.id] === q.answer) setTimeout(() => { if (cur() === q) next(); }, 900);
     }
     function record(q) {
-      if (s.recorded[q.id]) return;
-      s.recorded[q.id] = true;
+      if (isW(q) || s.recorded[q.id]) return;
       const choice = s.answers[q.id];
-      Store.addAttempt({ qid: q.id, module: q.module, spec: q.spec, correct: choice === q.answer, choice: choice ?? null, time: Math.round(s.times[q.id] || 0), mode: s.kind === 'mock' ? 'mock' : s.kind === 'review' ? 'review' : (exam ? 'exam' : 'practice') });
+      const rec = { qid: q.id, module: q.module, spec: q.spec, correct: choice === q.answer, choice: choice ?? null, time: Math.round(s.times[q.id] || 0), mode: s.kind === 'mock' ? 'mock' : s.kind === 'review' ? 'review' : (exam ? 'exam' : 'practice') };
+      // A-level multiple choice is a 1-mark question, so it counts towards marks and time per mark
+      if ((Courses.course(q.course) || {}).kind !== 'esat') Object.assign(rec, { score: rec.correct ? 1 : 0, max: 1 });
+      s.recorded[q.id] = Store.addAttempt(rec);
     }
     function go(i) {
       if (i < 0 || i >= qs.length) return;
@@ -322,13 +421,13 @@
     async function finish(timeUp) {
       if (s.finished) return;
       if (exam && !timeUp) {
-        const unanswered = qs.filter((q) => s.answers[q.id] == null).length;
+        const unanswered = qs.filter((q) => !answered(q)).length;
         const ok = await U.confirm(`End ${s.kind === 'mock' ? 'this module' : 'the test'}?`, unanswered ? `${unanswered} question(s) unanswered. You can't come back once it has ended.` : 'You can\'t come back once it has ended.', 'End now');
         if (!ok) return;
       }
       s.finished = true;
       clearInterval(ticker);
-      // record everything not yet recorded (exam answers are recorded at the end, like a real paper)
+      // record MCQ answers (exam answers are recorded at the end, like a real paper); written ones are recorded when marked
       if (exam) qs.forEach(record);
       else qs.filter((q) => s.checked[q.id]).forEach(record);
       if (s.kind === 'mock') { Views.mock.moduleDone(s); return; }
@@ -340,19 +439,35 @@
       document.body.classList.remove('exam-mode');
       App.guard = null;
       const done = exam ? qs : qs.filter((q) => s.checked[q.id]);
-      const right = done.filter((q) => s.answers[q.id] === q.answer).length;
-      const totalTime = done.reduce((t, q) => t + (s.times[q.id] || 0), 0);
-      el.innerHTML = `<div class="page" style="padding:28px 34px">
-        <div class="page-head"><div><div class="crumbs"><a href="${s.returnTo}">← Back</a></div><h1>${U.esc(s.title)} – results</h1><p>${U.esc(s.subtitle || '')}</p></div>
-          <div class="row"><a class="btn" href="${s.returnTo}">Done</a>${Store.dueReview().length ? `<a class="btn primary" href="#/review">Review queue (${Store.dueReview().length})</a>` : ''}</div></div>
-        <div class="grid c4">
-          <div class="card stat"><span class="l">Score</span><span class="v">${right}/${done.length}</span></div>
-          <div class="card stat"><span class="l">Accuracy</span><span class="v">${done.length ? U.pct(right / done.length) : '–'}</span></div>
-          <div class="card stat"><span class="l">Avg time</span><span class="v">${done.length ? U.fmtSecs(totalTime / done.length) : '–'}</span></div>
-          <div class="card stat"><span class="l">Pace target</span><span class="v">89s</span></div>
-        </div>
-        <div class="card" style="margin-top:14px">${resultsTable(done, s)}</div></div>`;
-      bindResultRows(el, done, s);
+      const mcq = done.filter((q) => !isW(q));
+      const right = mcq.filter((q) => s.answers[q.id] === q.answer).length;
+      const written = done.filter(isW);
+      const draw = () => {
+        const marked = written.filter((q) => s.scores[q.id]);
+        const got = marked.reduce((t, q) => t + s.scores[q.id].score, 0);
+        const of = marked.reduce((t, q) => t + s.scores[q.id].max, 0);
+        const totalTime = done.reduce((t, q) => t + (s.times[q.id] || 0), 0);
+        el.innerHTML = `<div class="page" style="padding:28px 34px">
+          <div class="page-head"><div><div class="crumbs"><a href="${s.returnTo}">← Back</a></div><h1>${U.esc(s.title)} – results</h1><p>${U.esc(s.subtitle || '')}</p></div>
+            <div class="row"><a class="btn" href="${s.returnTo}">Done</a>${Store.dueReview().length ? `<a class="btn primary" href="#/review">Mistakes to review (${Store.dueReview().length})</a>` : ''}</div></div>
+          <div class="grid c4">
+            ${mcq.length ? `<div class="card stat"><span class="l">Multiple choice</span><span class="v">${right}/${mcq.length}</span></div>` : ''}
+            ${written.length ? `<div class="card stat"><span class="l">Written marks</span><span class="v">${of ? `${got}/${of}` : '–'}</span><span class="muted">${marked.length}/${written.length} marked</span></div>` : ''}
+            <div class="card stat"><span class="l">Score</span><span class="v">${done.length ? U.pct((right + marked.reduce((t, q) => t + s.scores[q.id].score / s.scores[q.id].max, 0)) / Math.max(1, mcq.length + marked.length)) : '–'}</span></div>
+            <div class="card stat"><span class="l">Time</span><span class="v">${U.fmtTime(totalTime)}</span></div>
+          </div>
+          ${written.length && marked.length < written.length ? '<div class="notice warn" style="margin-top:14px">Some written answers aren\'t marked yet – click <b>Mark</b> on each to count them in your progress.</div>' : ''}
+          <div class="card" style="margin-top:14px">${resultsTable(done, s)}</div></div>`;
+        bindResultRows(el, done, s, { photos, onScore: (q, score, max, by, feedback) => { saveScoreAfter(q, score, max, by, feedback); draw(); } });
+      };
+      draw();
+    }
+    // marking after the session has ended (exam mode / results page)
+    function saveScoreAfter(q, score, max, by, feedback) {
+      s.scores[q.id] = { score, max, by, feedback };
+      const patch = { score, max, correct: score / max >= 0.7, marker: by };
+      if (s.recorded[q.id]) Store.updateAttempt(q.id, s.recorded[q.id], patch);
+      else s.recorded[q.id] = Store.addAttempt(Object.assign({ qid: q.id, module: q.module, spec: q.spec, time: Math.round(s.times[q.id] || 0), mode: exam ? 'exam' : 'practice' }, patch));
     }
 
     /* ---------------- timer ---------------- */
@@ -376,14 +491,14 @@
         const left = Math.max(0, s.timeLimit - s.elapsed);
         timerEl.textContent = U.fmtTime(left);
         timerEl.classList.toggle('low', left <= Math.min(300, s.timeLimit * 0.15));
-        // pace check: are you behind the 89 s/question line?
-        const expected = qs.filter((q) => s.answers[q.id] != null).length * PACE;
+        // pace check: are you behind the target pace for the questions answered so far?
+        const expected = qs.filter(answered).reduce((t, q) => t + target(q), 0);
         timerEl.classList.toggle('pace-bad', s.elapsed > expected + PACE * 2);
-        timerEl.title = `Time remaining · pace target ${U.fmtTime(PACE * qs.length - s.elapsed)}`;
+        timerEl.title = 'Time remaining';
       } else {
         const q = cur();
         timerEl.textContent = U.fmtTime(q ? s.times[q.id] || 0 : 0);
-        timerEl.classList.toggle('pace-bad', q && (s.times[q.id] || 0) > PACE && !s.checked[q.id]);
+        timerEl.classList.toggle('pace-bad', q && (s.times[q.id] || 0) > target(q) && !s.checked[q.id]);
       }
       if (!s.finished && Date.now() - lastSave > 3000) { lastSave = Date.now(); save(); }
     }
@@ -391,7 +506,6 @@
 
     /* ---------------- events ---------------- */
     // Listen on the session's own root (not the persistent #view), so handlers die with the view.
-    const root = U.$('.session', el);
     root.addEventListener('click', (e) => {
       const t = e.target.closest('button, a');
       if (!t || !root.contains(t)) return;
@@ -404,16 +518,17 @@
       else if (t.dataset.jump != null) { go(+t.dataset.jump); }
       else if (t.hasAttribute('data-review-screen')) renderReviewScreen();
       else if (t.hasAttribute('data-review-flagged')) { const i = qs.findIndex((q) => s.flags[q.id]); if (i >= 0) go(i); }
-      else if (t.hasAttribute('data-review-unanswered')) { const i = qs.findIndex((q) => s.answers[q.id] == null); if (i >= 0) go(i); }
+      else if (t.hasAttribute('data-review-unanswered')) { const i = qs.findIndex((q) => !answered(q)); if (i >= 0) go(i); }
       else if (t.hasAttribute('data-end')) finish();
       else if (t.hasAttribute('data-quit')) { if (exam) { if (!showingReview) renderReviewScreen(); else finish(); } else finish(); }
       else if (t.hasAttribute('data-pause')) setPaused(!s.paused);
       else if (t.dataset.side) openSide(t.dataset.side);
       else if (t.hasAttribute('data-side-close')) closeSide();
       else if (t.hasAttribute('data-ai-explain')) { if (sideTab !== 'tutor') openSide('tutor'); }
-      else if (t.hasAttribute('data-ai-mark')) C.markWorking(cur(), s.answers[cur().id], { boardImage: board && board.toDataURL() });
+      else if (t.hasAttribute('data-ai-mark')) C.markWorking(cur(), s.answers[cur().id], { boardImage: boardImage() });
       else if (t.hasAttribute('data-edit')) editCurrent();
       else if (t.hasAttribute('data-hide')) hideCurrent();
+      else if (t.hasAttribute('data-reopen')) { delete s.checked[cur().id]; save(); renderQuestion(); }
     });
     root.addEventListener('contextmenu', (e) => {
       const t = e.target.closest('[data-opt]');
@@ -444,7 +559,7 @@
       if (U.$('.modal-back')) return;
       const k = e.key;
       const q = cur();
-      if (/^[a-hA-H]$/.test(k) && !showingReview && q) {
+      if (/^[a-hA-H]$/.test(k) && !showingReview && q && !isW(q)) {
         const i = U.letterIndex(k);
         if (i < q.options.length) { e.preventDefault(); if (e.shiftKey) strike(i); else choose(i); }
         return;
@@ -475,23 +590,56 @@
 
   /* ---------------- shared results table (also used by mocks) ---------------- */
   function resultsTable(qsList, s) {
+    s.scores = s.scores || {};
     return `<table class="tbl"><thead><tr><th>#</th><th>Topic</th><th>You</th><th>Answer</th><th class="num">Time</th><th></th></tr></thead><tbody>
       ${qsList.map((q, i) => {
+        if (q.type === 'written') {
+          const sc = s.scores[q.id];
+          return `<tr class="click" data-row="${i}"><td>${i + 1}</td><td><b>${U.esc(Bank.specLabel(q.spec))}</b> <span class="muted">${U.esc(Bank.specTitle(q.spec))}</span></td>
+            <td>${sc ? `<span class="chip ${sc.score / sc.max >= 0.7 ? 'good' : 'bad'}">${sc.score}/${sc.max}</span>` : '<span class="chip warn">not marked</span>'}</td>
+            <td>${q.marks} marks</td><td class="num">${U.fmtSecs(s.times[q.id] || 0)}</td><td><a href="javascript:void 0">${sc ? 'Review →' : 'Mark →'}</a></td></tr>`;
+        }
         const a = s.answers[q.id];
         const ok = a === q.answer;
-        return `<tr class="click" data-row="${i}"><td>${i + 1}</td><td><b>${U.esc(q.spec)}</b> <span class="muted">${U.esc(Bank.specTitle(q.spec))}</span></td>
+        return `<tr class="click" data-row="${i}"><td>${i + 1}</td><td><b>${U.esc(Bank.specLabel(q.spec))}</b> <span class="muted">${U.esc(Bank.specTitle(q.spec))}</span></td>
           <td>${a == null ? '<span class="chip">—</span>' : `<span class="chip ${ok ? 'good' : 'bad'}">${U.letter(a)} ${ok ? '✓' : '✗'}</span>`}</td>
           <td>${U.letter(q.answer)}</td><td class="num ${(s.times[q.id] || 0) > PACE * 1.5 ? 'muted' : ''}">${U.fmtSecs(s.times[q.id] || 0)}</td><td><a href="javascript:void 0">Solution →</a></td></tr>`;
       }).join('')}</tbody></table>`;
   }
-  function bindResultRows(root, qsList, s) {
-    U.$$('[data-row]', root).forEach((tr) => tr.onclick = () => Session.showSolution(qsList[+tr.dataset.row], s.answers[qsList[+tr.dataset.row].id], s.times[qsList[+tr.dataset.row].id]));
+  function bindResultRows(root, qsList, s, opts = {}) {
+    U.$$('[data-row]', root).forEach((tr) => tr.onclick = () => {
+      const q = qsList[+tr.dataset.row];
+      if (q.type === 'written') Session.markModal(q, { text: (s.written || {})[q.id] || '', images: (opts.photos || {})[q.id] || [] }, (s.scores || {})[q.id], opts.onScore);
+      else Session.showSolution(q, s.answers[q.id], s.times[q.id]);
+    });
   }
   Session.resultsTable = resultsTable;
   Session.bindResultRows = bindResultRows;
 
+  // Modal: your written answer + mark scheme + marking (used after timed sets)
+  Session.markModal = (q, answer, existing, onScore) => {
+    const body = U.html(`<div>
+      <div class="row" style="margin-bottom:12px">${C.metaChips(q)}</div>
+      ${C.stemHTML(q)}
+      <div class="card" style="background:var(--panel-2);margin-top:12px"><b>Your answer</b>
+        ${answer.text.trim() ? `<div class="rich" style="margin-top:8px;white-space:pre-wrap">${U.md(answer.text)}</div>` : '<p class="muted" style="margin:6px 0 0">(no typed answer)</p>'}
+        ${answer.images.length ? `<div class="thumbs" style="margin-top:8px">${answer.images.map((p) => `<div class="t"><img src="${p}"></div>`).join('')}</div>` : ''}</div>
+      <div data-mark style="margin-top:14px"></div>
+      <details style="margin-top:14px"><summary><b>Worked solution</b></summary><div class="rich" style="margin-top:8px">${U.md(q.solution)}</div></details>
+    </div>`);
+    const m = U.modal({ title: `${Bank.specLabel(q.spec)} · ${Bank.specTitle(q.spec)}`, body, wide: true, buttons: [{ label: 'Close', kind: 'primary' }] });
+    C.markPanel(U.$('[data-mark]', body), q, {
+      getAnswer: () => answer, initial: existing,
+      onSave: (score, max, by, feedback) => { onScore && onScore(q, score, max, by, feedback); },
+    });
+    return m;
+  };
+
   // Modal with a question, your answer and the worked solution, plus AI help.
   Session.showSolution = (q, choice, time) => {
+    if (q.type === 'written') return Session.markModal(q, { text: '', images: [] }, null, (qq, score, max, by) => {
+      Store.addAttempt({ qid: q.id, module: q.module, spec: q.spec, score, max, correct: score / max >= 0.7, marker: by, time: 0, mode: 'practice' });
+    });
     const body = U.html(`<div>
       <div class="row" style="margin-bottom:12px">${C.metaChips(q)}${time != null ? `<span class="chip">${U.fmtSecs(time)}</span>` : ''}</div>
       ${C.stemHTML(q)}${C.optionsHTML(q, { choice, revealed: true })}
@@ -500,7 +648,7 @@
     </div>`);
     let chat = null;
     U.modal({
-      title: `${q.spec} · ${Bank.specTitle(q.spec)}`, body, wide: true,
+      title: `${Bank.specLabel(q.spec)} · ${Bank.specTitle(q.spec)}`, body, wide: true,
       buttons: [
         { label: '✦ Ask AI tutor', onClick: () => {
           if (!AI.isConfigured()) { C.needAI(); return false; }
@@ -520,5 +668,6 @@
   };
 
   Session.PACE = PACE;
+  Session.PER_MARK = PER_MARK;
   (window.Views = window.Views || {}).session = Session;
 })();

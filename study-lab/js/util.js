@@ -227,8 +227,23 @@
     img.src = dataUrl;
   });
 
-  U.moduleName = (id) => ({ maths1: 'Mathematics 1', maths2: 'Mathematics 2', physics: 'Physics', chemistry: 'Chemistry', biology: 'Biology' }[id] || id);
-  U.moduleShort = (id) => ({ maths1: 'Maths 1', maths2: 'Maths 2', physics: 'Physics', chemistry: 'Chemistry', biology: 'Biology' }[id] || id);
+  // Unit (ESAT module or A-level unit) names. ESAT names get an "ESAT" prefix when you also study A-levels,
+  // so "Physics" (ESAT) can't be confused with an A-level Physics unit.
+  const mixed = () => { try { const p = Store.profile(); return !!(p && p.units && Object.values(p.units).some((v) => v === 'current' || v === 'done' || v === 'later')); } catch (e) { return false; } };
+  U.moduleName = (id) => {
+    const u = window.Courses && Courses.unit(id);
+    if (!u) return id;
+    if (u.course === 'esat') return (mixed() ? 'ESAT ' : '') + u.name;
+    const c = Courses.course(u.course);
+    return `${c ? c.short + ' ' : ''}${u.short}${u.name && u.name !== u.short ? ': ' + u.name : ''}`;
+  };
+  U.moduleShort = (id) => {
+    const u = window.Courses && Courses.unit(id);
+    if (!u) return id;
+    if (u.course === 'esat') return (mixed() ? 'ESAT ' : '') + u.short;
+    const c = Courses.course(u.course);
+    return /^unit/i.test(u.short) && c ? `${c.short} ${u.short.replace(/^unit\s*/i, 'U')}` : u.short;
+  };
 
   // Query-string helpers for hash routes like #/bank/maths1?spec=M2.3
   U.parseHash = () => {

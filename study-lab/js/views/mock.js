@@ -48,8 +48,7 @@
   };
 
   function renderSetup(el) {
-    const prof = Store.profile();
-    const mine = prof.modules;
+    const mine = Store.esatModules().length ? Store.esatModules() : ['maths1'];
     const counts = Object.fromEntries(window.ESAT_MODULE_ORDER.map((m) => [m, Bank.forModule(m).length]));
     const mocks = Store.mocks().slice().sort((a, b) => b.at - a.at);
     const unfinished = mocks.find((m) => !m.done);

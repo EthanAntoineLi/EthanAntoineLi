@@ -1,5 +1,5 @@
 @echo off
-rem Starts ESAT Practice on http://localhost:8765 and opens it in your browser.
+rem Starts Study Lab on http://localhost:8765 and opens it in your browser.
 cd /d "%~dp0"
 where py >nul 2>nul
 if not errorlevel 1 (

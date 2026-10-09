@@ -210,7 +210,7 @@
     }
     const headers = { 'content-type': 'application/json' };
     if (c.apiKey) headers.authorization = 'Bearer ' + c.apiKey;
-    if (c.provider === 'openrouter') { headers['X-Title'] = 'ESAT Practice (local)'; }
+    if (c.provider === 'openrouter') { headers['X-Title'] = 'Study Lab (local)'; }
     const body = { model: c.model, messages: msgs, stream: true };
     const res = await send(c.base + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body), signal: opts.signal });
     if (!res.ok) throw await errorFrom(res);
@@ -275,6 +275,7 @@
     ESAT_FACTS,
 
     tutor(q, ctx) {
+      if (q.type === 'written') return A.prompts.tutorWritten(q, ctx);
       const opts = q.options.map((o, i) => `${U.letter(i)}. ${o}`).join('\n');
       return `You are a friendly, sharp ESAT tutor helping a sixth-form student who is practising for the ESAT.
 ${ESAT_FACTS}
@@ -296,6 +297,144 @@ How to help:
 - Use LaTeX in $...$ for maths. Short paragraphs or bullet points.
 - If the student shares their working (text or a photo), find the exact step where it goes wrong.
 - If the question or official answer looks wrong to you, say so plainly and explain why.`;
+    },
+
+    tutorWritten(q, ctx) {
+      const course = Courses.courseOfUnit(q.module);
+      return `You are a friendly, sharp tutor helping a student revise ${course ? course.name + ' (' + course.board + ')' : 'for their exams'}.
+${levelFacts(q)}
+
+The student is working on this exam-style question (${U.moduleName(q.module)}, spec ${Bank.specLabel(q.spec)} – ${Bank.specTitle(q.spec)}), worth ${q.marks} marks:
+
+QUESTION:
+${q.stem}
+
+${ctx.answer ? `STUDENT'S ANSWER SO FAR:\n${ctx.answer}\n` : ''}${ctx.revealed ? `MARK SCHEME:\n${q.markScheme}\n\nWORKED SOLUTION:\n${q.solution}` : 'The student has NOT seen the mark scheme yet: give hints and ask guiding questions; do not give the full solution unless they explicitly ask for it.'}
+
+How to help:
+- Be concise and exam-focused: what the examiner wants to see, where marks are won and lost, standard methods and notation for this board.
+- Point out links to earlier topics/units when relevant (e.g. "this uses the integration by parts from P4").
+- Use LaTeX in $...$ for maths. Short paragraphs or bullet points.
+- If the student shares working (text or photo), find the exact step where it goes wrong and say which mark it would lose.
+- If the question or mark scheme looks wrong, say so plainly.`;
+    },
+
+    markWritten(q, ms) {
+      const rows = (ms || C.parseMarkScheme(q.markScheme)).items.filter((it) => !it.label);
+      return `You are an experienced A-level examiner marking ONE student answer against the official-style mark scheme below.
+${levelFacts(q)}
+
+QUESTION (${U.moduleName(q.module)}, ${q.marks} marks):
+${q.stem}
+
+MARK SCHEME:
+${q.markScheme}
+
+WORKED SOLUTION (for reference):
+${q.solution}
+
+Marking conventions (Pearson Edexcel style):
+- M marks: method marks for a correct method applied to the problem; small slips don't lose an M mark.
+- A marks: accuracy marks; depend on the preceding M mark(s) being earned ("A0" if the method is wrong). "ft" = follow-through: award if correct using the student's earlier wrong value.
+- B marks: independent marks for a correct result or statement. dM: method mark dependent on the previous M mark.
+- E/C marks: explanation/communication; give only if the reasoning is clearly stated.
+- Accept any correct alternative method that earns equivalent marks, unless the question demands a particular method ("show that", "hence").
+- For "show that" questions the given answer must be reached with every necessary step shown.
+- Mark what is written, not what you think the student meant. If the answer is missing, illegible or blank, award 0.
+
+Reply in this format:
+### Marks
+- one bullet per mark-scheme row, in order: the code(s), ✓ or ✗, and a short reason quoting the student where useful
+
+### Feedback
+- where marks were lost and exactly how to fix it (1–4 bullets)
+- one tip for exam technique on this kind of question
+
+AWARDS: ${rows.length ? rows.map((r) => `<0-${r.marks}>`).join(',') : '(omit this line)'}
+SCORE: x/${q.marks}
+
+The AWARDS line must list the marks awarded for each of the ${rows.length} mark-scheme rows, in order, separated by commas. Use LaTeX in $...$ for maths.`;
+    },
+
+    generateWritten({ module, specs, difficulty, count, examples, avoid }) {
+      const unit = Courses.unit(module), course = Courses.courseOfUnit(module);
+      const specLines = specs.map((code) => { const i = Bank.specInfo(code); return `- ${code} (${Bank.specLabel(code)}) ${i.point.title}: ${i.point.text}`; }).join('\n');
+      const prereq = Courses.prereqChain(module).map((id) => Courses.unit(id)).filter(Boolean).map((u) => u.short).join(', ');
+      const ex = examples.map((q) => formatWritten(q)).join('\n');
+      return `You are a senior examiner writing exam questions for ${course ? course.name + ' – ' + course.board : 'A-level'}, unit ${unit.short}${unit.code ? ' (' + unit.code + ')' : ''}: ${unit.name}.
+${prereq ? `Students taking this unit are assumed to know: ${prereq}. Questions may use that earlier knowledge, as real papers do.` : ''}
+
+Write ${count} NEW, ORIGINAL exam-style questions with full mark schemes, spread across these specification points:
+${specLines}
+
+Difficulty: ${difficulty === 'hard' ? 'hard – like the last questions on a paper, multi-step and unstructured' : difficulty === 'easy' ? 'accessible – early-paper questions, well structured' : 'typical – a mix, structured into parts (a), (b), (c) like a real paper'}.
+
+Rules:
+- Match the style, notation and command words of real ${course ? course.board : ''} papers for this unit. Each question 4–14 marks, split into parts with the marks for each part shown in bold brackets, e.g. **(3)**.
+- The MARK SCHEME lists every mark on its own line starting with "- ", using bold codes: **M1** method, **dM1** dependent method, **A1** accuracy (put "ft" after it if follow-through), **B1** independent, **E1** explanation. Group lines under bold part labels like "**(a)**". The marks in the scheme must add up to MARKS.
+- Numbers should work out sensibly; use g = 9.8 m s⁻² in mechanics unless the spec says otherwise; give answers to sensible accuracy as the board would.
+- Self-contained text: describe any diagram fully in words or a small markdown table.
+- Use LaTeX in $...$ for maths. Do NOT use JSON.
+- Solve every question yourself first and make sure the mark scheme and final answers are correct.
+${avoid && avoid.length ? '- Do not repeat these existing questions:\n' + avoid.map((x) => '  * ' + x.slice(0, 120)).join('\n') : ''}
+
+${examples.length ? `Example of the exact output format${examples.length > 1 ? 's' : ''}:\n${ex}\n` : `Exact output format:\n${formatWritten({ spec: specs[0], difficulty: 2, marks: 5, stem: '(question text with parts (a), (b) and bold marks like **(2)**)', markScheme: '**(a)**\n- **M1** ...\n- **A1** ...\n**(b)**\n- **B1** ...\n- **M1** ...\n- **A1** ...', solution: '(full worked solution)' })}\n`}
+Now output exactly ${count} questions in that format, each starting with "=== QUESTION ===" and ending with "=== END ===". No other text.`;
+    },
+
+    verifyWritten(q) {
+      return `Check this exam question and its mark scheme very carefully, as a second examiner would. Solve it yourself independently first.
+
+QUESTION (${q.marks} marks):
+${q.stem}
+
+MARK SCHEME:
+${q.markScheme}
+
+SOLUTION:
+${q.solution}
+
+Is the question well-posed, are all the answers in the mark scheme and solution correct, and do the marks add up to ${q.marks}?
+Briefly show your own key results, then finish with exactly one line:
+VERDICT: OK
+or
+VERDICT: PROBLEM – <what is wrong>`;
+    },
+
+    extractWritten(module) {
+      const unit = Courses.unit(module);
+      const specs = Courses.points(module).map((p) => `${p.key} ${p.title}`).join('\n');
+      return `You convert exam questions (and, if provided, their mark schemes) into a structured format for a student's personal revision app. The unit is ${unit ? unit.short + ' – ' + unit.name : 'unknown'}.
+
+The student will give you screenshots, photos or pasted text of past-paper / textbook questions, possibly with the official mark scheme. For EACH question you can see, output:
+=== QUESTION ===
+SPEC: <best matching spec key from the list below>
+MARKS: <total marks>
+DIFFICULTY: <1, 2 or 3>
+STEM:
+<the question, copied faithfully, with parts (a), (b)… and marks in bold brackets like **(3)**; maths in LaTeX $...$; describe diagrams in words>
+MARK SCHEME:
+<if an official mark scheme is visible, copy it as lines "- **M1** …", "- **A1** …" grouped under "**(a)**" etc. Otherwise write one yourself in the same style. Marks must add up to MARKS.>
+SOLUTION:
+<a concise worked solution>
+=== END ===
+
+Output only the blocks.
+
+Spec keys:
+${specs}`;
+    },
+
+    syllabus() {
+      return `You turn a pasted exam syllabus / specification into a structured list for a student's revision tracker.
+
+Output ONLY this plain-text format (no commentary, no code fences):
+# Course: <course name> | <exam board and qualification>
+# Unit: <short code, e.g. FP3 or Paper 1> | <unit name> | <AS or A2, if known> | prereqs: <comma-separated short codes of earlier units it builds on, if any>
+## <topic number> <topic title>
+<topic>.<point> <short point title> | <one-sentence description of what is assessed>
+
+Rules: keep the syllabus's own unit/topic numbering where it has one; one line per assessable statement (or tight group of statements); cover everything examinable; don't invent content.`;
     },
 
     markWorking(q, choice) {
@@ -476,6 +615,65 @@ Format:
 
 Use LaTeX in $...$ where needed.`;
     },
+  };
+
+  function levelFacts(q) {
+    const c = q && Courses.courseOfUnit(q.module);
+    if (!c || c.kind === 'esat') return ESAT_FACTS;
+    if (/edexcel/i.test(c.board) && /international/i.test(c.board)) return `About the exams: Pearson Edexcel International A Level (IAL). Unit papers are marked with M (method), A (accuracy), B (independent) marks. Calculators are allowed. Mechanics uses g = 9.8 m s⁻² unless stated. Typical pace: about 1.2 minutes per mark (75 marks in 1 h 30 for most maths units).`;
+    return `About the exams: ${c.board || 'A-level'} ${c.name}. Answers are marked against a mark scheme with method and accuracy marks.`;
+  }
+
+  function formatWritten(q) {
+    return `=== QUESTION ===
+SPEC: ${q.spec}
+MARKS: ${q.marks}
+DIFFICULTY: ${q.difficulty || 2}
+STEM:
+${q.stem}
+MARK SCHEME:
+${q.markScheme}
+SOLUTION:
+${q.solution}
+=== END ===`;
+  }
+  A.formatWritten = formatWritten;
+
+  // Parse written-question blocks.
+  A.parseWrittenQuestions = (text, defaults = {}) => {
+    text = A.clean(text).replace(/```[a-z]*\n?/g, '');
+    const blocks = text.split(/===\s*QUESTION\s*===/i).slice(1);
+    const out = [];
+    for (let raw of blocks) {
+      raw = raw.split(/===\s*END\s*===/i)[0];
+      const grab = (name, next) => {
+        const re = new RegExp(`(?:^|\\n)\\s*${name}\\s*:\\s*([\\s\\S]*?)(?=\\n\\s*(?:${next.join('|')})\\s*:|$)`, 'i');
+        const m = re.exec(raw);
+        return m ? m[1].trim() : '';
+      };
+      const spec = grab('SPEC', ['MARKS', 'DIFFICULTY', 'STEM']).split(/\s/)[0];
+      const marksGiven = parseInt(grab('MARKS', ['DIFFICULTY', 'STEM']), 10);
+      const difficulty = parseInt(grab('DIFFICULTY', ['STEM']), 10) || 2;
+      const stem = grab('STEM', ['MARK SCHEME']);
+      const markScheme = grab('MARK SCHEME', ['SOLUTION']);
+      const solution = grab('SOLUTION', ['=== END']);
+      if (!stem || !markScheme) continue;
+      const total = C.parseMarkScheme(markScheme).total;
+      const info = Bank.specInfo(spec);
+      out.push(Object.assign({
+        id: U.uid('q-'), type: 'written',
+        module: info ? info.module : defaults.module,
+        spec: info ? spec : (defaults.spec || ''),
+        difficulty: U.clamp(difficulty, 1, 3),
+        marks: total || marksGiven || 1, marksStated: marksGiven || null,
+        stem, markScheme, solution: solution || '(no solution given)',
+      }, defaults.extra || {}));
+    }
+    return out;
+  };
+  A.parseVerdict = (text) => {
+    const m = /VERDICT\s*:\s*\**\s*(OK|PROBLEM)\b[\s\-–:]*(.*)/i.exec(text || '');
+    return m ? { ok: m[1].toUpperCase() === 'OK', note: (m[2] || '').trim() } : null;
   };
 
   function specCatalogue(module) {

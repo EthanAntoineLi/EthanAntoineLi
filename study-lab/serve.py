@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run ESAT Practice locally.
+"""Run Study Lab locally.
 
     python3 serve.py            # opens http://localhost:8765 in your browser
     python3 serve.py --port 9000 --no-browser
@@ -133,7 +133,7 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Run ESAT Practice on your computer.")
+    ap = argparse.ArgumentParser(description="Run Study Lab on your computer.")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
     args = ap.parse_args()
@@ -144,7 +144,7 @@ def main():
         print("Could not start on port %d (%s). Try: python3 serve.py --port 8766" % (args.port, e))
         sys.exit(1)
     url = "http://localhost:%d/" % args.port
-    print("ESAT Practice is running at %s" % url)
+    print("Study Lab is running at %s" % url)
     print("Keep this window open while you practise. Press Ctrl+C to stop.")
     if not args.no_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()

@@ -9,16 +9,17 @@
   };
 
   App.refreshChrome = () => {
-    const due = Store.dueReview().length;
-    U.$('#nav-review-count').textContent = due ? String(due) : '';
     const p = Store.profile();
-    const mods = p ? p.modules.map(U.moduleShort).join(' · ') : '';
-    U.$('#sidebar-foot').innerHTML = `${p ? `<div><b>${U.esc(p.name || 'You')}</b></div><div>${U.esc(mods)}</div>` : ''}
+    const due = p ? Store.dueReview().length : 0;
+    U.$('#nav-review-count').textContent = due ? String(due) : '';
+    U.$('#nav-mock').style.display = p && !Store.esatOn() ? 'none' : '';
+    const current = p ? Store.studyUnits(['current']).map(U.moduleShort) : [];
+    U.$('#sidebar-foot').innerHTML = `${p ? `<div><b>${U.esc(p.name || 'You')}</b></div><div>${U.esc(current.join(' · ') || 'no subjects yet')}</div>` : ''}
       <div style="margin-top:6px">AI: ${AI.isConfigured() ? U.esc(AI.config().model) : '<a href="#/settings">not set up</a>'}</div>`;
   };
 
   const ROUTES = {
-    '': 'dashboard', setup: 'setup', bank: 'bank', practice: 'session', mock: 'mock', review: 'review', stats: 'stats',
+    '': 'dashboard', setup: 'setup', bank: 'bank', practice: 'session', mock: 'mock', review: 'review', stats: 'stats', map: 'map',
     challenges: 'challenges', interview: 'interview', generate: 'generate', settings: 'settings', mine: 'bank',
   };
 
