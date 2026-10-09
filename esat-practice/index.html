@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESAT Practice</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232f5bea'/%3E%3Cpath d='M18 44V20h22v6H25v4h13v6H25v8z' fill='white'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <a class="brand" href="#/">
+        <span class="brand-mark">E</span>
+        <span class="brand-text">ESAT Practice<small>local edition</small></span>
+      </a>
+      <nav id="nav">
+        <a href="#/" data-route="dashboard"><span class="ico">⌂</span>Dashboard</a>
+        <a href="#/bank" data-route="bank"><span class="ico">☰</span>Question bank</a>
+        <a href="#/mock" data-route="mock"><span class="ico">⏱</span>Mock test</a>
+        <a href="#/review" data-route="review"><span class="ico">↻</span>Review queue <span class="badge" id="nav-review-count"></span></a>
+        <a href="#/stats" data-route="stats"><span class="ico">▦</span>Progress</a>
+        <a href="#/challenges" data-route="challenges"><span class="ico">✦</span>Challenge problems</a>
+        <a href="#/interview" data-route="interview"><span class="ico">◉</span>AI interview</a>
+        <a href="#/generate" data-route="generate"><span class="ico">✚</span>AI question maker</a>
+        <a href="#/settings" data-route="settings"><span class="ico">⚙</span>Settings</a>
+      </nav>
+      <div class="sidebar-foot" id="sidebar-foot"></div>
+    </aside>
+    <main id="view" tabindex="-1"></main>
+  </div>
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+
+  <script src="vendor/katex/katex.min.js"></script>
+  <script src="data/spec.js"></script>
+  <script src="data/courses.js"></script>
+  <script src="data/questions-maths1.js"></script>
+  <script src="data/questions-maths2.js"></script>
+  <script src="data/questions-physics.js"></script>
+  <script src="data/questions-chemistry.js"></script>
+  <script src="data/questions-biology.js"></script>
+  <script src="data/challenges.js"></script>
+  <script src="js/util.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/bank.js"></script>
+  <script src="js/ai.js"></script>
+  <script src="js/whiteboard.js"></script>
+  <script src="js/components.js"></script>
+  <script src="js/views/dashboard.js"></script>
+  <script src="js/views/setup.js"></script>
+  <script src="js/views/bank.js"></script>
+  <script src="js/views/session.js"></script>
+  <script src="js/views/mock.js"></script>
+  <script src="js/views/review.js"></script>
+  <script src="js/views/stats.js"></script>
+  <script src="js/views/challenges.js"></script>
+  <script src="js/views/interview.js"></script>
+  <script src="js/views/generate.js"></script>
+  <script src="js/views/settings.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
