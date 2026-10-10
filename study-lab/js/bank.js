@@ -88,6 +88,9 @@
       for (const a of attempts) {
         if (a.spec) {
           add(out.spec, a.spec, a);
+          // a question that also tests other spec points counts for them too (spec level only, so unit totals aren't doubled)
+          const q = B.byId(a.qid);
+          if (q && q.specs) for (const k of q.specs) if (k !== a.spec) add(out.spec, k, a);
           const sec = B.sectionOf(a.spec);
           add(out.section, sec ? sec.key : a.spec.split('.')[0], a);
         }

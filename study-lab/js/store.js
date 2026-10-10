@@ -14,6 +14,16 @@
     mem[key] = v;
     return v;
   }
+  // read a key without caching a missing value (used for backups)
+  function peek(key) {
+    if (key in mem) return mem[key];
+    try { const raw = localStorage.getItem(P + key); return raw != null ? JSON.parse(raw) : null; } catch (e) { return null; }
+  }
+  // the spec points an attempt counts towards: its question's main point and any others it also tests
+  function specsOf(a) {
+    const q = window.Bank && Bank.byId(a.qid);
+    return [...new Set([a.spec].concat((q && q.specs) || []).filter(Boolean))];
+  }
   function save(key, value) {
     mem[key] = value;
     try { localStorage.setItem(P + key, JSON.stringify(value)); }
@@ -52,6 +62,14 @@
       for (const [id, st] of Object.entries(p.units || {})) if (statuses.includes(st) && window.Courses && Courses.unit(id)) out.push(id);
       return out;
     },
+    // units a topic review covers by default: what you study now plus the earlier units it builds on
+    // (if they're done or current); with nothing current, everything you've done
+    defaultReviewScope() {
+      const cur = S.studyUnits(['current']);
+      const set = new Set(cur);
+      cur.forEach((u) => Courses.prereqChain(u).forEach((p) => { const st = S.unitStatus(p); if (st === 'done' || st === 'current') set.add(p); }));
+      return set.size ? [...set] : S.studyUnits(['current', 'done']);
+    },
     studyCourses() {
       const ids = new Set(S.studyUnits(['current', 'done', 'later']).map((u) => Courses.unit(u) && Courses.unit(u).course));
       return Courses.all().filter((c) => ids.has(c.id));
@@ -72,6 +90,7 @@
     /* After a marked answer: 2+ attempts on a spec point averaging 80%+ (last 5) turn it green;
        under 50% flags it as shaky. Whatever you set by hand stands until you answer on it again. */
     autoStatus(spec) {
+      if (Array.isArray(spec)) { spec.forEach((k) => S.autoStatus(k)); return; }
       if (!spec || !window.Bank || !S.settings().practice.autoStatus) return;
       const x = Bank.stats().spec[spec];
       if (!x || x.n < 2 || x.recentAcc == null) return;
@@ -82,7 +101,17 @@
 
     /* Your own courses, and edited copies of built-in ones */
     customCourses() { return load('customCourses', []); },
-    saveCustomCourse(c) { const list = S.customCourses().filter((x) => x.id !== c.id); list.push(c); save('customCourses', list); Courses.invalidate(); },
+    saveCustomCourse(c) {
+      // give clashing unit ids a course prefix now and store them, so they never shift when other courses change
+      const others = new Set(Courses.all().filter((x) => x.id !== c.id).flatMap((x) => x.units.map((u) => u.id)));
+      const ren = {};
+      c.units.forEach((u) => { if (others.has(u.id)) { ren[u.id] = c.id + '-' + u.id; u.id = ren[u.id]; } });
+      c.units.forEach((u) => { u.prereqs = (u.prereqs || []).map((p) => ren[p] || p); });
+      const list = S.customCourses();
+      const i = list.findIndex((x) => x.id === c.id);
+      if (i >= 0) list[i] = c; else list.push(c);
+      save('customCourses', list); Courses.invalidate();
+    },
     deleteCustomCourse(id) { save('customCourses', S.customCourses().filter((x) => x.id !== id)); Courses.invalidate(); },
     courseOverrides() { return load('courseOverrides', {}); },
     saveCourseOverride(id, c) { const o = S.courseOverrides(); if (c) o[id] = c; else delete o[id]; save('courseOverrides', o); Courses.invalidate(); },
@@ -105,10 +134,12 @@
     addAttempt(a) {
       const list = S.attempts();
       const rec = Object.assign({ at: Date.now() }, a);
+      // a written answer can be re-marked: remember the review-queue entry so a new mark replaces this one's effect
+      if (rec.marker) { const before = S.review()[a.qid]; rec.rvBefore = before ? Object.assign({}, before) : null; }
       list.push(rec);
       save('attempts', list);
       S.updateReview(a.qid, a.correct, a.mode);
-      S.autoStatus(rec.spec);
+      S.autoStatus(specsOf(rec));
       return rec.at;
     },
     // re-marking a written answer changes the score of that attempt
@@ -119,8 +150,11 @@
       const wasCorrect = a.correct;
       Object.assign(a, patch);
       save('attempts', list);
-      if (patch.correct != null && patch.correct !== wasCorrect) S.updateReview(qid, patch.correct, a.mode);
-      S.autoStatus(a.spec);
+      if (patch.correct != null && patch.correct !== wasCorrect) {
+        if ('rvBefore' in a) { const r = S.review(); if (a.rvBefore) r[qid] = Object.assign({}, a.rvBefore); else delete r[qid]; save('review', r); }
+        S.updateReview(qid, patch.correct, a.mode);
+      }
+      S.autoStatus(specsOf(a));
     },
     cutoffs() { return load('cutoffs', {}); },
     resetModule(module) { const c = S.cutoffs(); c[module] = Date.now(); save('cutoffs', c); },
@@ -190,14 +224,24 @@
     /* ---- backup ---- */
     exportAll(includeKey) {
       const data = { app: 'esat-practice', version: 1, exportedAt: new Date().toISOString() };
-      for (const k of S.KEYS) data[k] = load(k, null);
+      for (const k of S.KEYS) data[k] = peek(k);
       if (!includeKey && data.settings && data.settings.ai) data.settings = Object.assign({}, data.settings, { ai: Object.assign({}, data.settings.ai, { apiKey: '' }) });
       return data;
     },
     importAll(data, mode = 'replace') {
       if (!data || data.app !== 'esat-practice') throw new Error('That file is not a Study Lab backup.');
+      const byId = (here, inc) => { const ids = new Set(here.map((x) => x.id)); return here.concat(inc.filter((x) => !ids.has(x.id))); };
       for (const k of S.KEYS) {
         if (!(k in data) || data[k] == null) continue;
+        const here = peek(k);
+        if (mode === 'merge' && here != null) {
+          if (k === 'settings' || k === 'active') continue; // keep this browser's own
+          if (k === 'profile') { save(k, Object.assign({}, data.profile, here, { units: Object.assign({}, data.profile.units, here.units), modules: here.modules && here.modules.length ? here.modules : data.profile.modules || [] })); continue; }
+          if (k === 'specStatus') { const out = Object.assign({}, here); for (const [key, v] of Object.entries(data[k])) if (!out[key] || (v.at || 0) > (out[key].at || 0)) out[key] = v; save(k, out); continue; }
+          if (['mocks', 'interviews', 'customCourses'].includes(k)) { save(k, byId(here, data[k])); continue; }
+          if (k === 'hidden') { save(k, [...new Set(here.concat(data[k]))]); continue; }
+          if (!Array.isArray(here) && typeof here === 'object' && k !== 'attempts' && k !== 'custom') { save(k, Object.assign({}, data[k], here)); continue; }
+        }
         if (mode === 'merge' && k === 'attempts') {
           const seen = new Set(S.attempts().map((a) => a.qid + '|' + a.at));
           save(k, S.attempts().concat(data[k].filter((a) => !seen.has(a.qid + '|' + a.at))).sort((a, b) => a.at - b.at));

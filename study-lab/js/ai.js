@@ -277,10 +277,12 @@
     tutor(q, ctx) {
       if (q.type === 'written') return A.prompts.tutorWritten(q, ctx);
       const opts = q.options.map((o, i) => `${U.letter(i)}. ${o}`).join('\n');
-      return `You are a friendly, sharp ESAT tutor helping a sixth-form student who is practising for the ESAT.
-${ESAT_FACTS}
+      const course = Courses.courseOfUnit(q.module);
+      const esat = !course || course.kind === 'esat';
+      return `${esat ? 'You are a friendly, sharp ESAT tutor helping a sixth-form student who is practising for the ESAT.' : `You are a friendly, sharp tutor helping a student revise ${course.name} (${course.board}).`}
+${levelFacts(q)}
 
-The student is working on this question (${U.moduleName(q.module)}, spec ${q.spec} – ${Bank.specTitle(q.spec)}):
+The student is working on this multiple-choice question (${U.moduleName(q.module)}, spec ${Bank.specLabel(q.spec)} – ${Bank.specTitle(q.spec)}):
 
 QUESTION:
 ${q.stem}
@@ -293,7 +295,7 @@ ${ctx.choice != null && ctx.choice >= 0 ? `STUDENT'S ANSWER: ${U.letter(ctx.choi
 ${ctx.revealed ? `WORKED SOLUTION (the mark scheme):\n${q.solution}` : 'The student has NOT seen the answer yet: do not reveal which option is correct unless they explicitly ask for the answer. Prefer hints and questions.'}
 
 How to help:
-- Be concise and exam-focused: no-calculator methods, quick checks, elimination of options, spotting traps.
+- Be concise and exam-focused: ${esat ? 'no-calculator methods' : 'clear exam methods'}, quick checks, elimination of options, spotting traps.
 - Use LaTeX in $...$ for maths. Short paragraphs or bullet points.
 - If the student shares their working (text or a photo), find the exact step where it goes wrong.
 - If the question or official answer looks wrong to you, say so plainly and explain why.`;
@@ -372,7 +374,7 @@ Difficulty: ${difficulty === 'hard' ? 'hard – like the last questions on a pap
 Rules:
 - Match the style, notation and command words of real ${course ? course.board : ''} papers for this unit. Each question 4–14 marks, split into parts with the marks for each part shown in bold brackets, e.g. **(3)**.
 - The MARK SCHEME lists every mark on its own line starting with "- ", using bold codes: **M1** method, **dM1** dependent method, **A1** accuracy (put "ft" after it if follow-through), **B1** independent, **E1** explanation. Group lines under bold part labels like "**(a)**". The marks in the scheme must add up to MARKS.
-- Numbers should work out sensibly; use g = 9.8 m s⁻² in mechanics unless the spec says otherwise; give answers to sensible accuracy as the board would.
+- Numbers should work out sensibly; ${course && /physics/i.test(course.name) ? 'use g = 9.81 N kg⁻¹ (the IAL Physics data sheet value)' : course && /chem/i.test(course.name) ? 'use data from the IAL Chemistry data booklet' : 'use g = 9.8 m s⁻² in mechanics unless the spec says otherwise'}; give answers to sensible accuracy as the board would.
 - Self-contained text: describe any diagram fully in words or a small markdown table.
 - Use LaTeX in $...$ for maths. Do NOT use JSON.
 - Solve every question yourself first and make sure the mark scheme and final answers are correct.
@@ -439,10 +441,12 @@ Rules: keep the syllabus's own unit/topic numbering where it has one; one line p
 
     markWorking(q, choice) {
       const opts = q.options.map((o, i) => `${U.letter(i)}. ${o}`).join('\n');
-      return `You are an ESAT examiner marking a student's written working for one multiple-choice question.
-${ESAT_FACTS}
+      const course = Courses.courseOfUnit(q.module);
+      const esat = !course || course.kind === 'esat';
+      return `You are ${esat ? 'an ESAT' : 'an A-level'} examiner marking a student's written working for one multiple-choice question.
+${levelFacts(q)}
 
-QUESTION (${U.moduleName(q.module)}, spec ${q.spec}):
+QUESTION (${U.moduleName(q.module)}, spec ${Bank.specLabel(q.spec)}):
 ${q.stem}
 
 OPTIONS:
@@ -458,7 +462,7 @@ Mark the student's working out of 4 using this mark scheme (adapt the steps to t
 - M1: a correct overall approach / relevant principle identified
 - M1: key intermediate step(s) carried out correctly
 - A1: correct final value / conclusion reached from their working
-- E1: efficient, exam-appropriate method (would fit in ~90 seconds without a calculator)
+- E1: efficient, exam-appropriate method${esat ? ' (would fit in ~90 seconds without a calculator)' : ''}
 
 Reply in this format:
 ### Marks
@@ -620,7 +624,15 @@ Use LaTeX in $...$ where needed.`;
   function levelFacts(q) {
     const c = q && Courses.courseOfUnit(q.module);
     if (!c || c.kind === 'esat') return ESAT_FACTS;
-    if (/edexcel/i.test(c.board) && /international/i.test(c.board)) return `About the exams: Pearson Edexcel International A Level (IAL). Unit papers are marked with M (method), A (accuracy), B (independent) marks. Calculators are allowed. Mechanics uses g = 9.8 m s⁻² unless stated. Typical pace: about 1.2 minutes per mark (75 marks in 1 h 30 for most maths units).`;
+    if (/edexcel/i.test(c.board) && /international/i.test(c.board)) {
+      const phys = /physics/i.test(c.name), chem = /chem/i.test(c.name);
+      return `About the exams: Pearson Edexcel International A Level (IAL) ${c.name}. ${phys || chem
+        ? 'Answers are marked against a mark scheme: one mark per creditworthy point, and method/answer marks for calculations; units and significant figures matter. Papers have a multiple-choice section followed by structured questions.'
+        : 'Unit papers are marked with M (method), A (accuracy), B (independent) marks.'} Calculators are allowed. ${phys
+        ? 'Physics uses g = 9.81 N kg⁻¹ and the constants on the IAL Physics data sheet.'
+        : chem ? 'Use relative atomic masses and data from the IAL Chemistry data booklet.'
+          : 'Mechanics uses g = 9.8 m s⁻² unless stated. Typical pace: about 1.2 minutes per mark (75 marks in 1 h 30).'}`;
+    }
     return `About the exams: ${c.board || 'A-level'} ${c.name}. Answers are marked against a mark scheme with method and accuracy marks.`;
   }
 
@@ -639,9 +651,34 @@ ${q.solution}
   }
   A.formatWritten = formatWritten;
 
+  // Models format blocks loosely: bold or heading labels, numbered separators, Windows newlines. Make them uniform.
+  function normaliseBlocks(text) {
+    return A.clean(text).replace(/```[a-z]*\n?/g, '').replace(/\r\n?/g, '\n')
+      .replace(/===\s*QUESTION\s*\d*\s*===/gi, '=== QUESTION ===')
+      .replace(/^[ \t>#*_]*(SPEC|MARKS|DIFFICULTY|STEM|MARK SCHEME|SOLUTION|OPTIONS|ANSWER)[ \t]*[*_]*[ \t]*:[ \t]*[*_]*/gim, '$1:')
+      .replace(/^[ \t]*#{1,6}[ \t]*(STEM|MARK SCHEME|SOLUTION|OPTIONS)[ \t]*$/gim, '$1:');
+  }
+  /* Spec keys from a SPEC line, however the model wrote them: "fp3:1.2", "FP3 1.2", "fp3:1.1, fp3:1.2",
+     "Unit 4 6.1", or a bare "1.2" for the unit being written for. Keys of that unit come first. */
+  function resolveSpecs(raw, module) {
+    const toks = String(raw || '').replace(/[`*_()[\]]/g, ' ').split(/[\s,;]+/).filter(Boolean);
+    const pts = module ? Courses.points(module) : [];
+    const labels = Object.fromEntries(pts.map((p) => [Courses.label(p.key).toLowerCase(), p.key]));
+    const codes = Object.fromEntries(pts.map((p) => [p.code.toLowerCase(), p.key]));
+    const keys = [];
+    toks.forEach((t, i) => {
+      const lo = t.toLowerCase();
+      const k = Bank.specInfo(t) ? t : Bank.specInfo(lo) ? lo
+        : labels[(lo + ' ' + (toks[i + 1] || '')).toLowerCase()] || labels[lo.replace(':', ' ')] || codes[lo];
+      if (k && !keys.includes(k)) keys.push(k);
+    });
+    return keys.filter((k) => Bank.specInfo(k).module === module).concat(keys.filter((k) => Bank.specInfo(k).module !== module));
+  }
+  A.resolveSpecs = resolveSpecs;
+
   // Parse written-question blocks.
   A.parseWrittenQuestions = (text, defaults = {}) => {
-    text = A.clean(text).replace(/```[a-z]*\n?/g, '');
+    text = normaliseBlocks(text);
     const blocks = text.split(/===\s*QUESTION\s*===/i).slice(1);
     const out = [];
     for (let raw of blocks) {
@@ -651,7 +688,8 @@ ${q.solution}
         const m = re.exec(raw);
         return m ? m[1].trim() : '';
       };
-      const spec = grab('SPEC', ['MARKS', 'DIFFICULTY', 'STEM']).split(/\s/)[0];
+      const keys = resolveSpecs(grab('SPEC', ['MARKS', 'DIFFICULTY', 'STEM']), defaults.module);
+      const spec = keys[0] || '';
       const marksGiven = parseInt(grab('MARKS', ['DIFFICULTY', 'STEM']), 10);
       const difficulty = parseInt(grab('DIFFICULTY', ['STEM']), 10) || 2;
       const stem = grab('STEM', ['MARK SCHEME']);
@@ -664,6 +702,7 @@ ${q.solution}
         id: U.uid('q-'), type: 'written',
         module: info ? info.module : defaults.module,
         spec: info ? spec : (defaults.spec || ''),
+        specs: keys.length > 1 ? keys.slice(1) : undefined,
         difficulty: U.clamp(difficulty, 1, 3),
         marks: total || marksGiven || 1, marksStated: marksGiven || null,
         stem, markScheme, solution: solution || '(no solution given)',
@@ -698,7 +737,7 @@ ${q.solution}
 
   // Parse "=== QUESTION === … === END ===" blocks into question objects.
   A.parseQuestions = (text, defaults = {}) => {
-    text = A.clean(text).replace(/```[a-z]*\n?/g, '');
+    text = normaliseBlocks(text);
     const blocks = text.split(/===\s*QUESTION\s*===/i).slice(1);
     const out = [];
     for (let raw of blocks) {
@@ -708,7 +747,8 @@ ${q.solution}
         const m = re.exec(raw);
         return m ? m[1].trim() : '';
       };
-      const spec = grab('SPEC', ['DIFFICULTY', 'STEM']).split(/\s/)[0];
+      const keys = resolveSpecs(grab('SPEC', ['DIFFICULTY', 'STEM']), defaults.module);
+      const spec = keys[0] || '';
       const difficulty = parseInt(grab('DIFFICULTY', ['STEM']), 10) || 2;
       const stem = grab('STEM', ['OPTIONS']);
       const optBlock = grab('OPTIONS', ['ANSWER']);
@@ -739,7 +779,9 @@ ${q.solution}
   };
 
   A.parseScore = (text) => {
-    const m = /SCORE\s*:\s*\**\s*(\d+(?:\.\d+)?)\s*\/\s*(\d+)/i.exec(text || '');
+    const t = String(text || '').replace(/\\[()]|\$/g, '');
+    const all = [...t.matchAll(/SCORE\**\s*:\s*\**\s*(\d+(?:\.\d+)?)\s*(?:\/|out of)\s*(\d+)/gi)];
+    const m = all.length ? all[all.length - 1] : null;
     return m ? { got: parseFloat(m[1]), of: parseFloat(m[2]) } : null;
   };
   A.parseAnswer = (text) => {

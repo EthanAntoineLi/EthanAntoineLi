@@ -76,7 +76,7 @@
       return i.course.kind === 'esat' ? i.point.code : `${i.unit.short} ${i.point.code}`;
     },
     unitLabel(id) { const u = C.unit(id); return u ? (u.course === 'esat' ? u.short : `${u.short}`) : id; },
-    // prerequisite chain (earlier units this one builds on), nearest first, no duplicates
+    // prerequisite chain: every earlier unit this one builds on, directly or indirectly, no duplicates
     prereqChain(unitId) {
       const out = [], seen = new Set([unitId]);
       const visit = (id) => {
@@ -95,7 +95,9 @@
     toText(course) {
       const lines = [`# Course: ${course.name}${course.board ? ' | ' + course.board : ''}`];
       for (const u of course.units) {
-        lines.push('', `# Unit: ${u.short} | ${u.name} | ${u.level || ''} | prereqs: ${u.prereqs.join(', ')}${u.code ? ' | code: ' + u.code : ''}`);
+        // prerequisites inside this course are written by their short name (readable, survives an edit); others by id
+        const pre = u.prereqs.map((p) => { const t = course.units.find((x) => x.id === p); return t ? t.short : p; });
+        lines.push('', `# Unit: ${u.short} | ${u.name} | ${u.level || ''} | prereqs: ${pre.join(', ')}${u.code ? ' | code: ' + u.code : ''}`);
         for (const s of u.sections) {
           lines.push(`## ${s.code} ${s.title}`);
           for (const p of s.points) lines.push(`${p.code} ${p.title}${p.text ? ' | ' + p.text : ''}`);
@@ -103,8 +105,13 @@
       }
       return lines.join('\n');
     },
+    /* base: the course being edited. Units keep their ids (matched by short name, then exam code), so ticks,
+       scores and questions stay attached when a list is edited and saved. */
     fromText(text, base = {}) {
-      const course = { id: base.id, name: base.name || 'My course', board: base.board || '', kind: 'alevel', units: [] };
+      const course = { id: base.id, name: base.name || 'My course', short: base.short, board: base.board || '', kind: 'alevel', units: [] };
+      const norm = (x) => String(x).toLowerCase().replace(/[^a-z0-9]+/g, '');
+      const old = base.units || [];
+      const used = new Set();
       let unit = null, sec = null;
       for (const raw of String(text).split(/\r?\n/)) {
         const line = raw.trim();
@@ -118,12 +125,19 @@
           const short = parts[0] || 'Unit ' + (course.units.length + 1);
           const pre = parts.find((x) => /^prereqs?:/i.test(x));
           const code = parts.find((x) => /^code:/i.test(x));
+          const codeV = code ? code.replace(/^code:/i, '').trim() : '';
+          const prev = old.find((u) => !used.has(u.id) && norm(u.short) === norm(short)) || (codeV && old.find((u) => !used.has(u.id) && u.code === codeV));
+          const baseId = prev ? prev.id : (norm(short) || 'unit');
+          let id = baseId;
+          for (let k = 2; used.has(id); k++) id = baseId + '-' + k;
+          used.add(id);
           unit = {
-            id: short.toLowerCase().replace(/[^a-z0-9]+/g, ''), short, name: parts[1] || short,
+            id, short, name: parts[1] || short,
             level: (parts[2] && /^(AS|A2)$/i.test(parts[2])) ? parts[2].toUpperCase() : '',
-            prereqs: pre ? pre.replace(/^prereqs?:/i, '').split(',').map((x) => x.trim().toLowerCase().replace(/[^a-z0-9]+/g, '')).filter(Boolean) : [],
-            code: code ? code.replace(/^code:/i, '').trim() : '', sections: [],
+            prereqs: pre ? pre.replace(/^prereqs?:/i, '').split(',').map((x) => x.trim()).filter(Boolean) : [],
+            code: codeV, sections: [],
           };
+          if (prev && prev.practical) unit.practical = true;
           course.units.push(unit); sec = null;
         } else if ((m = /^##\s*([\w.]+)\s+(.*)$/.exec(line))) {
           if (!unit) { unit = { id: 'unit1', short: 'Unit 1', name: 'Unit 1', prereqs: [], sections: [] }; course.units.push(unit); }
@@ -135,6 +149,13 @@
           sec.points.push({ code: m[1], title: title.trim(), text: rest.join('|').trim() });
         }
       }
+      // prerequisites: a unit of this course (by short name or id), else any existing unit id
+      course.units.forEach((u) => {
+        u.prereqs = [...new Set(u.prereqs.map((p) => {
+          const t = course.units.find((x) => norm(x.short) === norm(p) || x.id === p.toLowerCase());
+          return t ? t.id : p.toLowerCase().replace(/[^a-z0-9_-]+/g, '');
+        }).filter((p) => p && p !== u.id))];
+      });
       return course;
     },
   };

@@ -26,7 +26,7 @@
         <td><div class="rich" style="max-height:3.2em;overflow:hidden">${U.mdInline(q.stem.split('\n')[0].slice(0, 180))}</div></td>
         <td style="white-space:nowrap">${x.stage ? '<span class="chip blue">confirming</span>' : '<span class="chip bad">missed</span>'}${x.misses > 1 ? ` <small>${x.misses}× wrong</small>` : ''}</td>
         <td style="white-space:nowrap">${x.due <= now ? 'now' : U.fmtDate(x.due)}</td>
-        <td><button class="btn sm ghost" data-drop="${id}" title="Remove from queue">✕</button></td></tr>`;
+        <td><button class="btn sm ghost" data-drop="${U.esc(id)}" title="Remove from queue">✕</button></td></tr>`;
     };
     const byUnit = {};
     ids.forEach((id) => { const m = Bank.byId(id).module; byUnit[m] = (byUnit[m] || 0) + 1; });
@@ -49,13 +49,7 @@
     const allMine = Store.studyUnits(['current', 'done']);
     // default scope: current units + every earlier unit they build on (if you study / studied it)
     let scope = params.units ? params.units.split(',').filter((u) => Courses.unit(u)) : null;
-    if (!scope) {
-      const cur = Store.studyUnits(['current']);
-      const set = new Set(cur);
-      cur.forEach((u) => Courses.prereqChain(u).forEach((p) => { if (Store.unitStatus(p) === 'done' || Store.unitStatus(p) === 'current') set.add(p); }));
-      scope = [...set];
-      if (!scope.length) scope = allMine;
-    }
+    if (!scope) scope = Store.defaultReviewScope();
     const order = params.order || 'due';
     const includeUnstarted = params.all === '1';
     const n = parseInt(params.n || '10', 10);

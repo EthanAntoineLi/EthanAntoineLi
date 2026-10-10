@@ -102,14 +102,15 @@
       if (!modules.length) return U.toast('No questions available for those modules', 'bad');
       const mock = { id: U.uid('mock-'), at: Date.now(), modules, current: 0, done: false, strict: U.$('[data-strict]', el).checked };
       Store.saveMock(mock);
-      startModule(mock);
+      // if you chose to keep an unfinished session instead, don't leave an empty mock behind
+      startModule(mock).then((ok) => { if (ok === false) Store.deleteMock(mock.id); });
     };
   }
 
   function startModule(mock) {
     const part = mock.modules[mock.current];
     const n = part.qids.length;
-    Views.session.start({
+    return Views.session.start({
       kind: 'mock', mode: 'exam',
       title: `${U.moduleName(part.module)} – module ${mock.current + 1} of ${mock.modules.length}`,
       subtitle: `Mock · ${n} questions · ${mock.strict === false ? 'untimed' : U.fmtTime(Math.round(n * (MINUTES * 60 / PER_MODULE)))}`,

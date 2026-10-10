@@ -13,10 +13,8 @@
     const mine = Store.studyUnits(['current', 'done']);
     const weak = Bank.weakest(mine, 6);
 
-    // topics due across current units + their prerequisites
-    const scope = new Set(current);
-    current.forEach((u) => Courses.prereqChain(u).forEach((p) => { if (Store.unitStatus(p)) scope.add(p); }));
-    const topicsDue = Bank.topicReview([...scope]).filter((r) => r.due >= 1).length;
+    // topics due across current units + the earlier units they build on (same scope as the Review page)
+    const topicsDue = Bank.topicReview(Store.defaultReviewScope()).filter((r) => r.due >= 1).length;
 
     // streak
     const days = new Set(Store.attempts().map((a) => U.dayKey(a.at)));

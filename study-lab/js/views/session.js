@@ -12,11 +12,19 @@
 
   const Session = {};
   // ESAT multiple choice at ESAT pace; A-level questions (incl. Section A multiple choice) at 72 s per mark
-  const target = (q) => (q.type === 'written' ? q.marks * PER_MARK : (Courses.course(q.course) || {}).kind === 'esat' ? PACE : PER_MARK);
+  const isEsatQ = (q) => (Courses.course(q.course) || {}).kind === 'esat';
+  const target = (q) => (q.type === 'written' ? q.marks * PER_MARK : isEsatQ(q) ? PACE : PER_MARK);
 
   // Build and start a session. cfg: {kind, title, subtitle, qids, mode, timeLimit, returnTo, mock}
-  Session.start = (cfg) => {
-    if (!cfg.qids || !cfg.qids.length) { U.toast('No questions match that – try another topic or make some with the AI question maker.', 'bad'); return; }
+  // Resolves false if there were no questions or you chose to keep an unfinished session.
+  Session.start = async (cfg) => {
+    if (!cfg.qids || !cfg.qids.length) { U.toast('No questions match that – try another topic or make some with the AI question maker.', 'bad'); return false; }
+    const prev = Store.active();
+    const prevDone = prev && !prev.finished ? Object.keys(prev.answers || {}).length + Object.values(prev.written || {}).filter((t) => String(t || '').trim()).length : 0;
+    if (prevDone && !(await U.confirm('Discard your unfinished session?', `"${prev.title}" isn't finished (${prevDone}/${prev.qids.length} answered). Starting a new set discards it – or cancel and resume it from the dashboard.`, 'Discard and start', true))) {
+      if (cfg.replaceHistory) history.back();
+      return false;
+    }
     const mode = cfg.mode || 'relaxed';
     const limit = cfg.qids.reduce((t, id) => { const q = Bank.byId(id); return t + (q ? target(q) : PACE); }, 0);
     const s = Object.assign({
@@ -30,6 +38,7 @@
     Store.setActive(s);
     // When started from a #/practice?… link, replace that history entry so Back doesn't start a new set.
     if (replace) location.replace('#/practice/run'); else U.go('#/practice/run');
+    return true;
   };
 
   // Turn #/practice?module=…&spec=…&n=…&mode=… into a session.
@@ -51,7 +60,8 @@
 
   Session.render = (el, { parts, params }) => {
     if (parts[1] !== 'run') { fromParams(params); return; }
-    const s = Store.active();
+    let s = Store.active();
+    if (s && s.finished) { Store.clearActive(); s = null; }
     if (!s) { el.innerHTML = `<div class="page"><div class="empty"><p>No session running.</p><a class="btn primary" href="#/bank">Choose a topic</a></div></div>`; return; }
     return run(el, s);
   };
@@ -102,7 +112,8 @@
     const paneNav = U.$('[data-pane=nav]', side), paneBoard = U.$('[data-pane=board]', side), paneTutor = U.$('[data-pane=tutor]', side);
     const timerEl = U.$('[data-timer]', el), progEl = U.$('[data-progress]', el);
 
-    const save = () => Store.setActive(s);
+    const save = () => { if (!s.finished) Store.setActive(s); };
+    let onUnload = null;
     const cur = () => qs[s.i];
     const isW = (q) => q.type === 'written';
     const answered = (q) => (isW(q) ? !!((s.written[q.id] || '').trim() || (photos[q.id] || []).length) : s.answers[q.id] != null);
@@ -145,14 +156,17 @@
           ${ph.length ? `<div class="thumbs" style="margin-top:8px">${ph.map((p) => `<div class="t"><img src="${p}"></div>`).join('')}</div>` : ''}</div>`;
         return;
       }
-      answerBox = C.answerBox(host, {
-        text: s.written[q.id] || '', images: photos[q.id] || [], board: boardImage,
-        onChange: U.debounce(() => {
-          if (!answerBox) return;
-          s.written[q.id] = answerBox.text(); photos[q.id] = answerBox.images(); save(); renderProgress();
-          if (sideTab === 'nav') renderNav();
-        }, 300),
+      const saveSoon = U.debounce(() => { save(); renderProgress(); if (sideTab === 'nav') renderNav(); }, 300);
+      const box = C.answerBox(host, {
+        text: s.written[q.id] || '', images: photos[q.id] || [], board: boardImage, useBoard: !(s.noBoard || {})[q.id],
+        onChange: () => {
+          s.written[q.id] = box.text(); photos[q.id] = box.images();
+          s.noBoard = s.noBoard || {};
+          if (box.useBoard()) delete s.noBoard[q.id]; else s.noBoard[q.id] = true;
+          saveSoon();
+        },
       });
+      answerBox = box;
     }
 
     function renderSolution() {
@@ -172,16 +186,16 @@
             <button class="btn sm ghost" data-hide title="Remove from your bank">Hide</button>
           </div></div>`;
         C.markPanel(U.$('[data-mark]', host), q, {
-          getAnswer: () => ({ text: s.written[q.id] || '', images: (photos[q.id] || []).concat(boardImage() ? [boardImage()] : []) }),
+          getAnswer: () => ({ text: s.written[q.id] || '', images: (photos[q.id] || []).concat(!(s.noBoard || {})[q.id] && boardImage() ? [boardImage()] : []) }),
           initial: sc,
-          onSave: (score, max, by, feedback) => { saveScore(q, score, max, by, feedback); },
+          onSave: (score, max, by, feedback, awards) => { saveScore(q, score, max, by, feedback, awards); },
         });
         return;
       }
       const choice = s.answers[q.id];
       const ok = choice === q.answer;
       host.innerHTML = `<div class="solution">
-        <div class="verdict ${ok ? 'good' : 'bad'}">${ok ? '✓ Correct' : choice == null ? '— Not answered' : '✗ Not quite'} <span class="muted" style="font-size:14px;font-weight:500">· answer ${U.letter(q.answer)} · ${U.fmtSecs(s.times[q.id] || 0)} (pace ≈ 89s)</span></div>
+        <div class="verdict ${ok ? 'good' : 'bad'}">${ok ? '✓ Correct' : choice == null ? '— Not answered' : '✗ Not quite'} <span class="muted" style="font-size:14px;font-weight:500">· answer ${U.letter(q.answer)} · ${U.fmtSecs(s.times[q.id] || 0)} (pace ≈ ${U.fmtSecs(target(q))})</span></div>
         <h3>Worked solution</h3>
         <div class="rich">${U.md(q.solution)}</div>
         <div class="row" style="margin-top:14px">
@@ -193,8 +207,8 @@
         </div></div>`;
     }
 
-    function saveScore(q, score, max, by, feedback) {
-      s.scores[q.id] = { score, max, by, feedback: feedback || (s.scores[q.id] && s.scores[q.id].feedback) || '' };
+    function saveScore(q, score, max, by, feedback, awards) {
+      s.scores[q.id] = { score, max, by, feedback: feedback || (s.scores[q.id] && s.scores[q.id].feedback) || '', awards: awards || null };
       const patch = { score, max, correct: score / max >= 0.7, marker: by };
       if (s.recorded[q.id]) Store.updateAttempt(q.id, s.recorded[q.id], patch);
       else s.recorded[q.id] = Store.addAttempt(Object.assign({ qid: q.id, module: q.module, spec: q.spec, time: Math.round(s.times[q.id] || 0), mode: s.kind === 'review' ? 'review' : (exam ? 'exam' : 'practice') }, patch));
@@ -307,7 +321,7 @@
         ] : [
           { label: 'Explain the solution', text: 'Explain the worked solution step by step, simply.' },
           { label: 'Where did I go wrong?', text: s.answers[q.id] === q.answer ? 'I got it right – is there a faster way?' : `I chose ${U.letter(s.answers[q.id] ?? 0)}. What mistake probably led me there?` },
-          { label: 'Faster method', text: 'Show me the quickest no-calculator method for this, the way you would do it in 90 seconds.' },
+          { label: 'Faster method', text: isEsatQ(q) ? 'Show me the quickest no-calculator method for this, the way you would do it in 90 seconds.' : 'Show me the quickest exam method for this.' },
           { label: 'Similar question', text: 'Give me one similar question to try (with options), but don\'t give the answer until I reply.' },
         ]) : [
           { label: 'Give me a hint', text: 'Give me a small hint to get started – do not give the answer.' },
@@ -427,6 +441,8 @@
       }
       s.finished = true;
       clearInterval(ticker);
+      document.removeEventListener('keydown', onKey);
+      answerBox = null;
       // record MCQ answers (exam answers are recorded at the end, like a real paper); written ones are recorded when marked
       if (exam) qs.forEach(record);
       else qs.filter((q) => s.checked[q.id]).forEach(record);
@@ -458,13 +474,21 @@
           </div>
           ${written.length && marked.length < written.length ? '<div class="notice warn" style="margin-top:14px">Some written answers aren\'t marked yet – click <b>Mark</b> on each to count them in your progress.</div>' : ''}
           <div class="card" style="margin-top:14px">${resultsTable(done, s)}</div></div>`;
-        bindResultRows(el, done, s, { photos, onScore: (q, score, max, by, feedback) => { saveScoreAfter(q, score, max, by, feedback); draw(); } });
+        bindResultRows(el, done, s, { photos, onScore: (q, score, max, by, feedback, awards) => { saveScoreAfter(q, score, max, by, feedback, awards); draw(); } });
       };
       draw();
+      // written answers only count once marked, and they only live on this page: warn before leaving them
+      const unmarked = () => written.filter((q) => !s.scores[q.id]).length;
+      App.guard = async () => {
+        const left = unmarked();
+        return left ? U.confirm('Leave without marking?', `${left} written answer${left === 1 ? ' isn\'t' : 's aren\'t'} marked yet. If you leave now, ${left === 1 ? 'it' : 'they'} won't count towards your progress.`, 'Leave') : true;
+      };
+      onUnload = (e) => { if (unmarked()) { e.preventDefault(); e.returnValue = ''; } };
+      window.addEventListener('beforeunload', onUnload);
     }
     // marking after the session has ended (exam mode / results page)
-    function saveScoreAfter(q, score, max, by, feedback) {
-      s.scores[q.id] = { score, max, by, feedback };
+    function saveScoreAfter(q, score, max, by, feedback, awards) {
+      s.scores[q.id] = { score, max, by, feedback, awards: awards || null };
       const patch = { score, max, correct: score / max >= 0.7, marker: by };
       if (s.recorded[q.id]) Store.updateAttempt(q.id, s.recorded[q.id], patch);
       else s.recorded[q.id] = Store.addAttempt(Object.assign({ qid: q.id, module: q.module, spec: q.spec, time: Math.round(s.times[q.id] || 0), mode: exam ? 'exam' : 'practice' }, patch));
@@ -585,7 +609,7 @@
     if (s.paused) setPaused(true);
     renderQuestion();
     draw();
-    return () => { clearInterval(ticker); document.removeEventListener('keydown', onKey); if (!s.finished) save(); if (board) board.destroy(); };
+    return () => { clearInterval(ticker); document.removeEventListener('keydown', onKey); if (onUnload) window.removeEventListener('beforeunload', onUnload); if (!s.finished) save(); if (board) board.destroy(); };
   }
 
   /* ---------------- shared results table (also used by mocks) ---------------- */
@@ -603,7 +627,7 @@
         const ok = a === q.answer;
         return `<tr class="click" data-row="${i}"><td>${i + 1}</td><td><b>${U.esc(Bank.specLabel(q.spec))}</b> <span class="muted">${U.esc(Bank.specTitle(q.spec))}</span></td>
           <td>${a == null ? '<span class="chip">—</span>' : `<span class="chip ${ok ? 'good' : 'bad'}">${U.letter(a)} ${ok ? '✓' : '✗'}</span>`}</td>
-          <td>${U.letter(q.answer)}</td><td class="num ${(s.times[q.id] || 0) > PACE * 1.5 ? 'muted' : ''}">${U.fmtSecs(s.times[q.id] || 0)}</td><td><a href="javascript:void 0">Solution →</a></td></tr>`;
+          <td>${U.letter(q.answer)}</td><td class="num ${(s.times[q.id] || 0) > target(q) * 1.5 ? 'muted' : ''}">${U.fmtSecs(s.times[q.id] || 0)}</td><td><a href="javascript:void 0">Solution →</a></td></tr>`;
       }).join('')}</tbody></table>`;
   }
   function bindResultRows(root, qsList, s, opts = {}) {
@@ -630,7 +654,7 @@
     const m = U.modal({ title: `${Bank.specLabel(q.spec)} · ${Bank.specTitle(q.spec)}`, body, wide: true, buttons: [{ label: 'Close', kind: 'primary' }] });
     C.markPanel(U.$('[data-mark]', body), q, {
       getAnswer: () => answer, initial: existing,
-      onSave: (score, max, by, feedback) => { onScore && onScore(q, score, max, by, feedback); },
+      onSave: (score, max, by, feedback, awards) => { onScore && onScore(q, score, max, by, feedback, awards); },
     });
     return m;
   };
@@ -657,7 +681,7 @@
           if (!chat) chat = C.chat(host, { title: 'AI tutor', botName: 'Tutor', system: () => AI.prompts.tutor(q, { choice, revealed: true }),
             quick: [{ label: 'Explain the solution', text: 'Explain the worked solution step by step, simply.' },
               { label: 'Where did I go wrong?', text: choice === q.answer ? 'I got it right – is there a faster way?' : `I chose ${choice == null ? 'nothing' : U.letter(choice)}. What mistake probably led me there?` },
-              { label: 'Faster method', text: 'Show me the quickest no-calculator method for this.' }] });
+              { label: 'Faster method', text: isEsatQ(q) ? 'Show me the quickest no-calculator method for this.' : 'Show me the quickest exam method for this.' }] });
           host.scrollIntoView({ behavior: 'smooth' });
           return false;
         } },

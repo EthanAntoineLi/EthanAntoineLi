@@ -25,7 +25,8 @@
       return { value: of ? got / of : 0, label: new Date(m.at).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }), title: `${U.fmtDate(m.at)}: ${m.modules.map((x) => `${U.moduleShort(x.module)} ${x.score}/${x.qids.length}`).join(', ')}` };
     });
     const weak = Bank.weakest(list, 10);
-    const total = att.length, right = att.filter((a) => a.correct).length;
+    // marks scored ÷ marks available, like every other score in the app (a 5/8 written answer counts 0.625)
+    const total = att.length, right = att.reduce((t, a) => t + Bank.value(a), 0);
 
     el.innerHTML = `<div class="page">
       <div class="page-head"><div><h1>Statistics</h1><p>Scores and timing per spec point, from everything you've answered. (Your learned/learning ticks live on the <a href="#/map">Progress map</a>.)</p></div>
@@ -34,7 +35,7 @@
         <div class="card stat"><span class="l">Answered</span><span class="v">${total}</span></div>
         <div class="card stat"><span class="l">Accuracy</span><span class="v">${U.pct(total ? right / total : null)}</span></div>
         <div class="card stat"><span class="l">Mocks done</span><span class="v">${mocks.length}</span></div>
-        <div class="card stat"><span class="l">Spec points tried</span><span class="v">${Object.keys(st.spec).length}</span><span class="muted">of ${list.reduce((a, m) => a + Courses.points(m).length, 0)}</span></div>
+        <div class="card stat"><span class="l">Spec points tried</span><span class="v">${list.flatMap((m) => Courses.points(m)).filter((p) => st.spec[p.key]).length}</span><span class="muted">of ${list.reduce((a, m) => a + Courses.points(m).length, 0)}</span></div>
       </div>
 
       <div class="card" style="margin-top:14px">

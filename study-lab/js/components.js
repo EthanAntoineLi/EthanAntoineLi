@@ -37,6 +37,7 @@
      **B1**, **B2**, **E1** (several per line allowed, e.g. **M1 A1**) – each become one tickable row.
      Other lines (e.g. "**(a)**" or notes) are shown as labels. */
   const CODE_RE = /(?<![A-Za-z])(?:d|D)?([MABEC])(\d)(?!\d)/g;
+  const AWARDS_LINE = /^\**AWARDS.*$/m;
   C.parseMarkScheme = (md) => {
     const items = [];
     let total = 0;
@@ -53,8 +54,9 @@
     return { items, total };
   };
 
-  /* C.markPanel(container, q, {getAnswer: () => ({text, images}), onSave(score, max, by, feedback), initial})
-     Lets you mark a written answer yourself against the scheme, or have the AI mark it. */
+  /* C.markPanel(container, q, {getAnswer: () => ({text, images}), onSave(score, max, by, feedback, awards), initial})
+     Lets you mark a written answer yourself against the scheme, or have the AI mark it.
+     initial = a saved mark {score, max, by, feedback, awards}; awards = marks per tickable row (restores the ticks). */
   C.markPanel = (container, q, opts) => {
     const ms = C.parseMarkScheme(q.markScheme);
     const max = q.marks || ms.total;
@@ -83,14 +85,22 @@
       manual = U.html(`<input type="number" min="0" max="${max}" value="0" style="width:80px">`);
       totalEl.replaceWith(manual);
     }
-    const score = () => manual ? U.clamp(parseFloat(manual.value) || 0, 0, max) : Math.min(max, awards.reduce((a, b) => a + b, 0));
+    const tickable = ms.items.filter((it) => !it.label).length;
+    // a saved or AI score the ticks can't show (older saves, or an AWARDS line that didn't fit the rows):
+    // shown as the total until you change a tick, so pressing Save never silently lowers it
+    let held = null;
+    let lastFeedback = '', by = 'self';
+    const score = () => manual ? U.clamp(parseFloat(manual.value) || 0, 0, max) : held != null ? Math.min(max, held) : Math.min(max, awards.reduce((a, b) => a + b, 0));
     const refresh = () => { if (!manual) totalEl.textContent = `${score()}/${max}`; };
+    const tickAwards = () => (manual ? null : ms.items.map((it, i) => (it.label ? null : awards[i])).filter((v) => v != null));
     list.addEventListener('change', (e) => {
       const i = e.target.dataset.i;
       if (i == null) return;
       awards[i] = e.target.type === 'checkbox' ? (e.target.checked ? ms.items[i].marks : 0) : parseInt(e.target.value, 10);
+      held = null; by = 'self'; // you changed the mark, so it's yours now
       refresh();
     });
+    if (manual) manual.addEventListener('input', () => { by = 'self'; });
     const setAwards = (arr) => {
       let k = 0;
       ms.items.forEach((it, i) => {
@@ -102,13 +112,13 @@
       });
       refresh();
     };
-    let lastFeedback = '', by = 'self';
-    U.$('[data-ms-save]', root).onclick = () => { opts.onSave(score(), max, by, lastFeedback); U.toast(`Saved ${score()}/${max}`, 'good'); };
+    U.$('[data-ms-save]', root).onclick = () => { opts.onSave(score(), max, by, lastFeedback, held != null ? null : tickAwards()); U.toast(`Saved ${score()}/${max}`, 'good'); };
     const aiBtn = U.$('[data-ms-ai]', root);
     aiBtn.onclick = async () => {
       if (!AI.isConfigured()) return C.needAI();
       const ans = opts.getAnswer();
       if (!ans.text.trim() && !ans.images.length) return U.toast('Write your answer (or add a photo of it) first');
+      if (!AI.config().vision && !ans.text.trim()) return U.toast('Your AI model is set as text-only, so it can\'t see photos – type your answer, or switch on image input in Settings', 'bad');
       const box = U.$('[data-ai-out]', root), out = U.$('.rich', box);
       box.classList.remove('hidden'); out.innerHTML = '<p class="muted typing">Marking against the mark scheme</p>';
       aiBtn.disabled = true;
@@ -116,24 +126,37 @@
         const full = AI.clean(await AI.chat({
           system: AI.prompts.markWritten(q, ms), effort: 'high',
           messages: [{ role: 'user', content: [{ type: 'text', text: 'My answer:\n' + (ans.text.trim() || '(see the attached photo(s) of my working)') }].concat(ans.images.map((d) => ({ type: 'image', dataUrl: d }))) }],
-          onToken: (t, all) => { out.innerHTML = U.md(AI.clean(all).replace(/^AWARDS:.*$/m, '')); },
+          onToken: (t, all) => { out.innerHTML = U.md(AI.clean(all).replace(AWARDS_LINE, '')); },
         }));
-        out.innerHTML = U.md(full.replace(/^AWARDS:.*$/m, ''));
+        out.innerHTML = U.md(full.replace(AWARDS_LINE, ''));
         lastFeedback = full;
-        const aw = /AWARDS\s*:\s*([\d,\s]+)/i.exec(full);
-        const tickable = ms.items.filter((it) => !it.label).length;
+        const aw = /\**AWARDS\**\s*:\s*\**\s*([\d,\s]+)/i.exec(full);
+        let applied = false;
         if (aw) {
           const arr = aw[1].split(/[,\s]+/).filter(Boolean).map(Number);
-          if (arr.length === tickable) setAwards(arr);
+          if (arr.length === tickable) { setAwards(arr); applied = true; }
         }
         const sc = AI.parseScore(full);
         if (sc && manual) manual.value = String(sc.got);
-        if (sc) { by = 'ai'; opts.onSave(Math.min(max, sc.got), max, 'ai', full); U.toast(`AI mark saved: ${Math.min(max, sc.got)}/${max} – adjust the ticks and Save if you disagree`, 'good'); }
+        if (sc) {
+          by = 'ai';
+          const got = Math.min(max, sc.got);
+          held = !manual && (!applied || awards.reduce((a, b) => a + b, 0) !== got) ? got : null;
+          refresh();
+          opts.onSave(got, max, 'ai', full, held != null ? null : tickAwards());
+          U.toast(`AI mark saved: ${got}/${max} – change the ticks and Save if you disagree`, 'good');
+        }
       } catch (e) { out.innerHTML = U.md('**Error:** ' + e.message); }
       aiBtn.disabled = false;
     };
     if (opts.initial) {
-      if (opts.initial.feedback) { const box = U.$('[data-ai-out]', root); box.classList.remove('hidden'); U.$('.rich', box).innerHTML = U.md(opts.initial.feedback.replace(/^AWARDS:.*$/m, '')); }
+      const ini = opts.initial;
+      if (ini.awards && ini.awards.length === tickable) setAwards(ini.awards);
+      else if (manual) manual.value = String(ini.score || 0);
+      else if (ini.score != null) held = ini.score;
+      by = ini.by || 'self';
+      lastFeedback = ini.feedback || '';
+      if (ini.feedback) { const box = U.$('[data-ai-out]', root); box.classList.remove('hidden'); U.$('.rich', box).innerHTML = U.md(ini.feedback.replace(AWARDS_LINE, '')); }
     }
     refresh();
     return { root };
@@ -144,7 +167,7 @@
     const root = U.html(`<div class="answer-box">
       <textarea data-ans rows="8" placeholder="Write your answer and working here. Maths: plain text is fine (x^2, sqrt(3), 1/2), or LaTeX in $…$. You can also add photos of your written working."></textarea>
       <div class="row" style="margin-top:8px"><label class="btn sm">📷 Add photo of working<input type="file" accept="image/*" multiple hidden data-photo></label>
-        ${opts.board ? '<label class="check" style="font-size:13px"><input type="checkbox" data-useboard checked> include my scratchpad</label>' : ''}
+        ${opts.board ? `<label class="check" style="font-size:13px"><input type="checkbox" data-useboard ${opts.useBoard === false ? '' : 'checked'}> include my scratchpad</label>` : ''}
         <div class="thumbs" data-thumbs></div><span class="spacer"></span><span class="muted" style="font-size:12px" data-preview-toggle></span></div>
     </div>`);
     container.appendChild(root);
@@ -167,6 +190,8 @@
     };
     ta.addEventListener('keydown', (e) => e.stopPropagation());
     ta.addEventListener('input', () => opts.onChange && opts.onChange());
+    const ubox = U.$('[data-useboard]', root);
+    if (ubox) ubox.addEventListener('change', () => opts.onChange && opts.onChange());
     return {
       root,
       get: () => {
@@ -177,6 +202,7 @@
       },
       text: () => ta.value,
       images: () => images.slice(),
+      useBoard: () => !ubox || ubox.checked,
       focus: () => ta.focus(),
     };
   };

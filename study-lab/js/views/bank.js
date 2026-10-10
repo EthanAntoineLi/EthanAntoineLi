@@ -97,11 +97,11 @@
         ${qs.length ? `<table class="tbl"><tbody>${qs.map((q, i) => {
           const h = hist[q.id];
           const status = !h ? '<span class="chip">new</span>' : h.lastCorrect ? '<span class="chip good">✓ last time</span>' : '<span class="chip bad">✗ last time</span>';
-          return `<tr class="click" data-q="${q.id}"><td style="width:30px">${i + 1}</td><td><div class="rich" style="max-height:3.2em;overflow:hidden">${U.mdInline(q.stem.split('\n')[0].slice(0, 220))}</div></td>
+          return `<tr class="click" data-q="${U.esc(q.id)}"><td style="width:30px">${i + 1}</td><td><div class="rich" style="max-height:3.2em;overflow:hidden">${U.mdInline(q.stem.split('\n')[0].slice(0, 220))}</div></td>
             <td style="white-space:nowrap">${q.type === 'written' ? q.marks + ' marks' : ['', 'Easier', 'Standard', 'Hard'][q.difficulty]}</td><td style="white-space:nowrap">${status}${q.source !== 'builtin' ? ' <span class="chip warn">' + (q.source === 'ai' ? 'AI' : 'mine') + '</span>' : ''}</td></tr>`;
         }).join('')}</tbody></table>` : `<div class="empty">No questions on this spec point yet.${AI.isConfigured() ? ` <a href="#/generate?specs=${encodeURIComponent(code)}">Make some with AI →</a>` : ' Connect an AI model in Settings to generate some, or write your own in <a href="#/mine">My questions</a>.'}</div>`}
       </div></div>`;
-    U.$$('[data-q]', el).forEach((r) => r.onclick = () => U.go(`#/practice?ids=${r.dataset.q}&title=${encodeURIComponent(Bank.specLabel(code) + ' · ' + info.point.title)}&mode=relaxed&back=${encodeURIComponent(location.hash)}`));
+    U.$$('[data-q]', el).forEach((r) => r.onclick = () => U.go(`#/practice?ids=${encodeURIComponent(r.dataset.q)}&title=${encodeURIComponent(Bank.specLabel(code) + ' · ' + info.point.title)}&mode=relaxed&back=${encodeURIComponent(location.hash)}`));
     U.$$('[data-status] button', el).forEach((b) => b.onclick = () => {
       Store.setSpecStatus(code, b.dataset.v);
       U.$$('[data-status] button', el).forEach((x) => x.classList.toggle('on', x === b));
@@ -121,10 +121,10 @@
       <div class="card">${custom.length ? `<table class="tbl"><thead><tr><th>Spec</th><th>Question</th><th>Source</th><th></th></tr></thead><tbody>
         ${custom.map((q) => `<tr><td style="white-space:nowrap"><b>${U.esc(Bank.specLabel(q.spec))}</b><br><small>${U.esc(U.moduleShort(q.module))}${q.type === 'written' ? ' · ' + q.marks + ' marks' : ''}</small></td>
           <td><div class="rich" style="max-height:3.2em;overflow:hidden">${U.mdInline(String(q.stem).split('\n')[0].slice(0, 200))}</div></td>
-          <td style="white-space:nowrap">${q.source === 'ai' ? `AI${q.model ? ' · ' + U.esc(q.model) : ''}` : q.source}${q.verified === false ? ' <span class="chip bad">unverified</span>' : q.verified ? ' <span class="chip good">checked</span>' : ''}</td>
-          <td style="white-space:nowrap"><button class="btn sm" data-try="${q.id}">Try</button> <button class="btn sm" data-edit="${q.id}">Edit</button> <button class="btn sm danger" data-del="${q.id}">Delete</button></td></tr>`).join('')}
+          <td style="white-space:nowrap">${q.source === 'ai' ? `AI${q.model ? ' · ' + U.esc(q.model) : ''}` : U.esc(q.source)}${q.verified === false ? ' <span class="chip bad">unverified</span>' : q.verified ? ' <span class="chip good">checked</span>' : ''}</td>
+          <td style="white-space:nowrap"><button class="btn sm" data-try="${U.esc(q.id)}">Try</button> <button class="btn sm" data-edit="${U.esc(q.id)}">Edit</button> <button class="btn sm danger" data-del="${U.esc(q.id)}">Delete</button></td></tr>`).join('')}
         </tbody></table>` : '<div class="empty">Nothing here yet. Use the <a href="#/generate">AI question maker</a>, import a pack, or write your own.</div>'}</div>
-      ${hidden.length ? `<div class="card"><h3>Hidden questions (${hidden.length})</h3><ul class="list-plain">${hidden.map((q) => `<li class="row between"><span><b>${U.esc(Bank.specLabel(q.spec))}</b> ${U.mdInline(String(q.stem).slice(0, 120))}</span><button class="btn sm" data-unhide="${q.id}">Unhide</button></li>`).join('')}</ul></div>` : ''}
+      ${hidden.length ? `<div class="card"><h3>Hidden questions (${hidden.length})</h3><ul class="list-plain">${hidden.map((q) => `<li class="row between"><span><b>${U.esc(Bank.specLabel(q.spec))}</b> ${U.mdInline(String(q.stem).slice(0, 120))}</span><button class="btn sm" data-unhide="${U.esc(q.id)}">Unhide</button></li>`).join('')}</ul></div>` : ''}
       <div class="card"><h3>Question pack format</h3><p class="muted" style="font-size:14px">A pack is a JSON array (or <code>{"questions": [...]}</code>). Each question:</p>
 <pre>[
  { "spec": "M2.3", "difficulty": 2,
@@ -150,11 +150,15 @@
         arr.forEach((q) => {
           const info = Bank.specInfo(q.spec);
           if (!q.stem || !info) return;
-          const base = { id: q.id && !existing.has(q.id) ? q.id : U.uid('q-'), module: info.module, spec: q.spec, specs: q.specs, difficulty: q.difficulty || 2, stem: q.stem, solution: q.solution || '', source: q.source || 'import', createdAt: Date.now() };
+          // only trust plain values from a shared file: simple ids, known sources, real spec keys
+          const id = typeof q.id === 'string' && /^[\w-]{1,60}$/.test(q.id) && !existing.has(q.id) && !Bank.byId(q.id) ? q.id : U.uid('q-');
+          existing.add(id);
+          const specs = Array.isArray(q.specs) ? q.specs.filter((k) => typeof k === 'string' && Bank.specInfo(k) && k !== q.spec) : [];
+          const base = { id, module: info.module, spec: q.spec, specs: specs.length ? specs : undefined, difficulty: [1, 2, 3].includes(+q.difficulty) ? +q.difficulty : 2, stem: String(q.stem), solution: String(q.solution || ''), source: ['ai', 'mine', 'import'].includes(q.source) ? q.source : 'import', createdAt: Date.now() };
           if (q.markScheme) {
             const marks = C.parseMarkScheme(q.markScheme).total;
             if (!marks) return;
-            ok.push(Object.assign(base, { type: 'written', markScheme: q.markScheme, marks }));
+            ok.push(Object.assign(base, { type: 'written', markScheme: String(q.markScheme), marks }));
             return;
           }
           const answer = typeof q.answer === 'string' ? U.letterIndex(q.answer) : q.answer;
@@ -166,7 +170,7 @@
         renderMine(el);
       } catch (err) { U.toast('Import failed: ' + err.message, 'bad'); }
     };
-    U.$$('[data-try]', el).forEach((b) => b.onclick = () => U.go(`#/practice?ids=${b.dataset.try}&title=${encodeURIComponent('My question')}&back=${encodeURIComponent('#/mine')}`));
+    U.$$('[data-try]', el).forEach((b) => b.onclick = () => U.go(`#/practice?ids=${encodeURIComponent(b.dataset.try)}&title=${encodeURIComponent('My question')}&back=${encodeURIComponent('#/mine')}`));
     U.$$('[data-edit]', el).forEach((b) => b.onclick = () => {
       const q = Store.custom().find((x) => x.id === b.dataset.edit);
       C.editQuestion(Bank.byId(q.id) || q, (v) => { Store.updateCustom(Object.assign({}, q, v)); U.toast('Saved', 'good'); renderMine(el); });

@@ -51,7 +51,13 @@
       const st = Bank.stats().spec;
       const counts = Bank.countBySpec();
       const esat = isEsat(module);
-      body.innerHTML = `<div class="split">
+      // a link can ask for spec points from several units: questions are made one unit at a time, so offer the rest
+      const otherUnits = [...new Set(preSpecs.map((k) => Bank.specInfo(k).module))].filter((u) => u !== module);
+      const otherNote = otherUnits.length ? `<div class="notice" style="margin-bottom:14px">You also asked for spec points in other units – make those next: ${otherUnits.map((u) => {
+        const ks = preSpecs.filter((k) => Bank.specInfo(k).module === u);
+        return `<a class="btn sm" href="#/generate?module=${encodeURIComponent(u)}&specs=${encodeURIComponent(ks.join(','))}">${U.esc(U.moduleShort(u))} (${ks.length})</a>`;
+      }).join(' ')}</div>` : '';
+      body.innerHTML = `${otherNote}<div class="split">
         <div class="card">
           <div class="row between"><h3 style="margin:0">1. Spec points</h3>
             <select data-module style="width:auto;max-width:100%">${unitOptions(module)}</select></div>
@@ -133,7 +139,7 @@
           }
           const extra = { source: 'ai', model: AI.config().model, createdAt: Date.now() };
           const parsed = (esat ? AI.parseQuestions(text, { module, extra }) : AI.parseWrittenQuestions(text, { module, extra }))
-            .map((q) => (q.module === module && q.spec ? q : Object.assign(q, { module, spec: uniq[0] })));
+            .map((q) => (q.spec ? q : Object.assign(q, { module, spec: uniq[0], verified: false, verifyNote: "The model didn't say which spec point this tests, so it was tagged with one you asked for – check the tag (✎) before saving." })));
           parsed.forEach((q) => { if (q.type === 'written' && q.marksStated && q.marksStated !== q.marks) { q.verified = false; q.verifyNote = `The mark scheme adds up to ${q.marks}, but the question says ${q.marksStated} marks.`; } });
           log(`  ✓ got ${parsed.length} question${parsed.length === 1 ? '' : 's'}`);
           if (!parsed.length) log('  (the reply could not be parsed – the model may not have followed the format)');
@@ -247,7 +253,8 @@
           const fallbackSpec = Courses.points(mod)[0].key;
           const extra = { source: 'import', model: AI.config().model, createdAt: Date.now() };
           qs = (esat ? AI.parseQuestions(reply, { module: mod, extra }) : AI.parseWrittenQuestions(reply, { module: mod, extra }))
-            .map((q) => (q.module === mod && q.spec ? q : Object.assign(q, { module: mod, spec: fallbackSpec })));
+            .map((q) => (q.spec ? q : Object.assign(q, { module: mod, spec: fallbackSpec, verified: false, verifyNote: "The model didn't say which spec point this tests, so it was tagged with the unit's first point – check the tag (✎) before saving." })));
+          qs.forEach((q) => { if (q.type === 'written' && q.marksStated && q.marksStated !== q.marks && q.verified !== false) { q.verified = false; q.verifyNote = `The mark scheme adds up to ${q.marks}, but the question says ${q.marksStated} marks – check the scheme before saving.`; } });
           log(`✓ found ${qs.length} question(s)`);
         } catch (e) { log('✗ ' + e.message); U.toast(e.message, 'bad'); }
         running = false;
@@ -280,11 +287,10 @@
         const unit = U.$('[data-punit]', body).value;
         if (!unit) return;
         const n = parseInt(U.$('[data-pn]', body).value, 10);
-        const prev = U.$('[data-pprev]', body).checked ? Courses.prereqChain(unit).filter((p) => Store.unitStatus(p) && !isEsat(p)) : [];
+        const prev = U.$('[data-pprev]', body).checked ? U.shuffle(Courses.prereqChain(unit).filter((p) => Store.unitStatus(p) && !isEsat(p))) : [];
         const nPrev = prev.length ? Math.round(n / 4) : 0;
         const qs = await makeQuestions({ module: unit, specs: Courses.points(unit).map((p) => p.key), count: n - nPrev, difficulty: 'mixed', verify: true, quiet: true });
-        const keepGoing = !stopFlag;
-        for (let i = 0; i < nPrev && keepGoing; i++) {
+        for (let i = 0; i < nPrev && !stopFlag; i++) {
           const pu = prev[i % prev.length];
           const before = logEl.textContent;
           const more = await makeQuestions({ module: pu, specs: Courses.points(pu).map((p) => p.key), count: 1, difficulty: 'mixed', verify: true, quiet: true });
