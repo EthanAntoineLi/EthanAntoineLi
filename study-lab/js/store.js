@@ -193,7 +193,8 @@
 
     /* ---- custom questions (AI-made / imported / your own) ---- */
     custom() { return load('custom', []); },
-    addCustom(qs) { const list = S.custom(); list.push(...qs); save('custom', list); Bank.invalidate(); },
+    // (saving the same preview twice – e.g. after cancelling a prompt – doesn't add duplicates)
+    addCustom(qs) { const list = S.custom(); const ids = new Set(list.map((q) => q.id)); list.push(...qs.filter((q) => !ids.has(q.id))); save('custom', list); Bank.invalidate(); },
     updateCustom(q) { save('custom', S.custom().map((x) => x.id === q.id ? q : x)); Bank.invalidate(); },
     deleteCustom(id) { save('custom', S.custom().filter((x) => x.id !== id)); Bank.invalidate(); },
 

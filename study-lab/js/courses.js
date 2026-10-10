@@ -11,7 +11,9 @@
     const idMap = {};
     for (const u0 of c.units || []) {
       const orig = String(u0.id).toLowerCase().replace(/[^a-z0-9_-]/g, '');
-      let id = orig;
+      // your own courses' units always carry the course id, so they can never take over (or lose) another
+      // course's unit id when courses are added, edited, deleted or merged in from a backup
+      let id = course.custom && !orig.startsWith(course.id + '-') ? course.id + '-' + orig : orig;
       if (takenIds.has(id)) id = course.id + '-' + id;
       takenIds.add(id);
       idMap[orig] = id;
@@ -108,7 +110,7 @@
     /* base: the course being edited. Units keep their ids (matched by short name, then exam code), so ticks,
        scores and questions stay attached when a list is edited and saved. */
     fromText(text, base = {}) {
-      const course = { id: base.id, name: base.name || 'My course', short: base.short, board: base.board || '', kind: 'alevel', units: [] };
+      const course = { id: base.id, name: base.name || 'My course', short: base.custom ? undefined : base.short, board: base.board || '', kind: 'alevel', units: [] };
       const norm = (x) => String(x).toLowerCase().replace(/[^a-z0-9]+/g, '');
       const old = base.units || [];
       const used = new Set();
@@ -153,7 +155,10 @@
       course.units.forEach((u) => {
         u.prereqs = [...new Set(u.prereqs.map((p) => {
           const t = course.units.find((x) => norm(x.short) === norm(p) || x.id === p.toLowerCase());
-          return t ? t.id : p.toLowerCase().replace(/[^a-z0-9_-]+/g, '');
+          if (t) return t.id;
+          const o = old.find((x) => norm(x.short) === norm(p)); // renamed unit: same id, new short
+          if (o && course.units.some((x) => x.id === o.id)) return o.id;
+          return p.toLowerCase().replace(/[^a-z0-9_-]+/g, '');
         }).filter((p) => p && p !== u.id))];
       });
       return course;

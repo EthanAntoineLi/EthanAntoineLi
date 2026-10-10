@@ -655,21 +655,33 @@ ${q.solution}
   function normaliseBlocks(text) {
     return A.clean(text).replace(/```[a-z]*\n?/g, '').replace(/\r\n?/g, '\n')
       .replace(/===\s*QUESTION\s*\d*\s*===/gi, '=== QUESTION ===')
-      .replace(/^[ \t>#*_]*(SPEC|MARKS|DIFFICULTY|STEM|MARK SCHEME|SOLUTION|OPTIONS|ANSWER)[ \t]*[*_]*[ \t]*:[ \t]*[*_]*/gim, '$1:')
+      // field labels only: "**STEM:**", "**STEM**:", "## STEM:", "> STEM:" – not bold content such as "**Answer: C**"
+      .replace(/^[ \t>#]*(\*\*|__)(SPEC|MARKS|DIFFICULTY|STEM|MARK SCHEME|SOLUTION|OPTIONS|ANSWER)[ \t]*(?:\1[ \t]*:|:[ \t]*\1)/gim, '$2:')
+      .replace(/^[ \t>#]*(SPEC|MARKS|DIFFICULTY|STEM|MARK SCHEME|SOLUTION|OPTIONS|ANSWER)[ \t]*:/gim, '$1:')
       .replace(/^[ \t]*#{1,6}[ \t]*(STEM|MARK SCHEME|SOLUTION|OPTIONS)[ \t]*$/gim, '$1:');
   }
   /* Spec keys from a SPEC line, however the model wrote them: "fp3:1.2", "FP3 1.2", "fp3:1.1, fp3:1.2",
      "Unit 4 6.1", or a bare "1.2" for the unit being written for. Keys of that unit come first. */
   function resolveSpecs(raw, module) {
-    const toks = String(raw || '').replace(/[`*_()[\]]/g, ' ').split(/[\s,;]+/).filter(Boolean);
-    const pts = module ? Courses.points(module) : [];
-    const labels = Object.fromEntries(pts.map((p) => [Courses.label(p.key).toLowerCase(), p.key]));
-    const codes = Object.fromEntries(pts.map((p) => [p.code.toLowerCase(), p.key]));
+    const orig = String(raw || '').replace(/[`*_()[\]]/g, ' ').split(/[\s,;]+/).filter(Boolean);
+    const toks = orig.map((t) => t.toLowerCase());
+    // labels ("m1 2.1", "unit 4 6.1") of every unit, with this unit's course winning any clash ("unit 1 1.1")
+    const course = module ? Courses.courseOfUnit(module) : null;
+    const labels = {};
+    for (const c of Courses.all().filter((x) => x !== course).concat(course ? [course] : [])) {
+      for (const u of c.units) for (const p of Courses.points(u.id)) labels[Courses.label(p.key).toLowerCase()] = p.key;
+    }
+    const shorts = new Set(Courses.all().flatMap((c) => c.units.map((u) => u.short.toLowerCase())));
+    const codes = Object.fromEntries((module ? Courses.points(module) : []).map((p) => [p.code.toLowerCase(), p.key]));
     const keys = [];
     toks.forEach((t, i) => {
-      const lo = t.toLowerCase();
-      const k = Bank.specInfo(t) ? t : Bank.specInfo(lo) ? lo
-        : labels[(lo + ' ' + (toks[i + 1] || '')).toLowerCase()] || labels[lo.replace(':', ' ')] || codes[lo];
+      const two = t + ' ' + (toks[i + 1] || ''), three = two + ' ' + (toks[i + 2] || '');
+      // a bare code belongs to this unit unless it follows a unit name ("M1 2.1" is M1's 2.1, handled at "m1")
+      const afterUnit = shorts.has(toks[i - 1] || '') || shorts.has((toks[i - 2] || '') + ' ' + (toks[i - 1] || ''));
+      // exact key as written, or with the unit id lower-cased ("PHY3:3A.1"), or an ESAT code in any case ("m2.3")
+      const o = orig[i], colon = o.indexOf(':');
+      const direct = [o, colon > 0 ? o.slice(0, colon).toLowerCase() + o.slice(colon) : null, o.toUpperCase()].find((x) => x && Bank.specInfo(x));
+      const k = direct || labels[two] || labels[three] || (!afterUnit && codes[t]);
       if (k && !keys.includes(k)) keys.push(k);
     });
     return keys.filter((k) => Bank.specInfo(k).module === module).concat(keys.filter((k) => Bank.specInfo(k).module !== module));

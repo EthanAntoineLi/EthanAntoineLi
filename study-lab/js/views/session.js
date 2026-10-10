@@ -22,7 +22,9 @@
     const prev = Store.active();
     const prevDone = prev && !prev.finished ? Object.keys(prev.answers || {}).length + Object.values(prev.written || {}).filter((t) => String(t || '').trim()).length : 0;
     if (prevDone && !(await U.confirm('Discard your unfinished session?', `"${prev.title}" isn't finished (${prevDone}/${prev.qids.length} answered). Starting a new set discards it – or cancel and resume it from the dashboard.`, 'Discard and start', true))) {
-      if (cfg.replaceHistory) history.back();
+      // started from a link: there may be no page to go back to (new tab, bookmark), so go to the dashboard,
+      // where the unfinished session can be resumed
+      if (cfg.replaceHistory) location.replace('#/');
       return false;
     }
     const mode = cfg.mode || 'relaxed';
@@ -118,6 +120,8 @@
     const isW = (q) => q.type === 'written';
     const answered = (q) => (isW(q) ? !!((s.written[q.id] || '').trim() || (photos[q.id] || []).length) : s.answers[q.id] != null);
     const boardImage = () => (board && !board.isEmpty() ? board.toDataURL() : null);
+    // what gets marked: your photos, plus the scratchpad unless you unticked 'include my scratchpad'
+    const answerImages = (q) => (photos[q.id] || []).concat(!(s.noBoard || {})[q.id] && boardImage() ? [boardImage()] : []);
 
     /* ---------------- rendering ---------------- */
     function renderQuestion() {
@@ -186,7 +190,7 @@
             <button class="btn sm ghost" data-hide title="Remove from your bank">Hide</button>
           </div></div>`;
         C.markPanel(U.$('[data-mark]', host), q, {
-          getAnswer: () => ({ text: s.written[q.id] || '', images: (photos[q.id] || []).concat(!(s.noBoard || {})[q.id] && boardImage() ? [boardImage()] : []) }),
+          getAnswer: () => ({ text: s.written[q.id] || '', images: answerImages(q) }),
           initial: sc,
           onSave: (score, max, by, feedback, awards) => { saveScore(q, score, max, by, feedback, awards); },
         });
@@ -438,6 +442,7 @@
         const unanswered = qs.filter((q) => !answered(q)).length;
         const ok = await U.confirm(`End ${s.kind === 'mock' ? 'this module' : 'the test'}?`, unanswered ? `${unanswered} question(s) unanswered. You can't come back once it has ended.` : 'You can\'t come back once it has ended.', 'End now');
         if (!ok) return;
+        if (s.finished) return; // time ran out while the dialog was open
       }
       s.finished = true;
       clearInterval(ticker);
@@ -474,7 +479,7 @@
           </div>
           ${written.length && marked.length < written.length ? '<div class="notice warn" style="margin-top:14px">Some written answers aren\'t marked yet – click <b>Mark</b> on each to count them in your progress.</div>' : ''}
           <div class="card" style="margin-top:14px">${resultsTable(done, s)}</div></div>`;
-        bindResultRows(el, done, s, { photos, onScore: (q, score, max, by, feedback, awards) => { saveScoreAfter(q, score, max, by, feedback, awards); draw(); } });
+        bindResultRows(el, done, s, { images: answerImages, onScore: (q, score, max, by, feedback, awards) => { saveScoreAfter(q, score, max, by, feedback, awards); draw(); } });
       };
       draw();
       // written answers only count once marked, and they only live on this page: warn before leaving them
@@ -483,6 +488,7 @@
         const left = unmarked();
         return left ? U.confirm('Leave without marking?', `${left} written answer${left === 1 ? ' isn\'t' : 's aren\'t'} marked yet. If you leave now, ${left === 1 ? 'it' : 'they'} won't count towards your progress.`, 'Leave') : true;
       };
+      if (onUnload) window.removeEventListener('beforeunload', onUnload);
       onUnload = (e) => { if (unmarked()) { e.preventDefault(); e.returnValue = ''; } };
       window.addEventListener('beforeunload', onUnload);
     }
@@ -633,7 +639,7 @@
   function bindResultRows(root, qsList, s, opts = {}) {
     U.$$('[data-row]', root).forEach((tr) => tr.onclick = () => {
       const q = qsList[+tr.dataset.row];
-      if (q.type === 'written') Session.markModal(q, { text: (s.written || {})[q.id] || '', images: (opts.photos || {})[q.id] || [] }, (s.scores || {})[q.id], opts.onScore);
+      if (q.type === 'written') Session.markModal(q, { text: (s.written || {})[q.id] || '', images: opts.images ? opts.images(q) : (opts.photos || {})[q.id] || [] }, (s.scores || {})[q.id], opts.onScore);
       else Session.showSolution(q, s.answers[q.id], s.times[q.id]);
     });
   }

@@ -139,7 +139,7 @@
           }
           const extra = { source: 'ai', model: AI.config().model, createdAt: Date.now() };
           const parsed = (esat ? AI.parseQuestions(text, { module, extra }) : AI.parseWrittenQuestions(text, { module, extra }))
-            .map((q) => (q.spec ? q : Object.assign(q, { module, spec: uniq[0], verified: false, verifyNote: "The model didn't say which spec point this tests, so it was tagged with one you asked for – check the tag (✎) before saving." })));
+            .map((q) => (q.spec ? q : Object.assign(q, { module, spec: uniq[0], specGuessed: true })));
           parsed.forEach((q) => { if (q.type === 'written' && q.marksStated && q.marksStated !== q.marks) { q.verified = false; q.verifyNote = `The mark scheme adds up to ${q.marks}, but the question says ${q.marksStated} marks.`; } });
           log(`  ✓ got ${parsed.length} question${parsed.length === 1 ? '' : 's'}`);
           if (!parsed.length) log('  (the reply could not be parsed – the model may not have followed the format)');
@@ -196,6 +196,7 @@
           <div class="row between"><label class="check"><input type="checkbox" data-keep="${i}" ${q._keep !== false ? 'checked' : ''}> Keep</label>
             <div class="row">${C.metaChips(q)}${q.verified ? '<span class="chip good">✓ checked</span>' : ''}<button class="btn sm" data-edit-r="${i}">Edit</button></div></div>
           ${q.verifyNote ? `<div class="notice warn" style="margin:8px 0;font-size:13px">${U.esc(q.verifyNote)}</div>` : ''}
+          ${q.specGuessed ? `<div class="notice warn" style="margin:8px 0;font-size:13px">The model didn't say which spec point this tests, so it's tagged ${U.esc(Bank.specLabel(q.spec))} as a guess – check the tag with Edit before saving.</div>` : ''}
           ${C.stemHTML(q)}${q.type === 'written' ? '' : C.optionsHTML(q, { revealed: true, choice: -1 })}
           ${q.type === 'written' ? `<details style="margin-top:10px"><summary>Mark scheme (${q.marks} marks)</summary><div class="rich" style="margin-top:8px">${U.md(q.markScheme)}</div></details>` : ''}
           <details style="margin-top:10px"><summary>Worked solution</summary><div class="rich" style="margin-top:8px">${U.md(q.solution)}</div></details>
@@ -203,14 +204,14 @@
         U.$$('[data-keep]', list).forEach((cb) => cb.onchange = () => { results[+cb.dataset.keep]._keep = cb.checked; });
         U.$$('[data-edit-r]', list).forEach((b) => b.onclick = () => {
           const i = +b.dataset.editR;
-          C.editQuestion(results[i], (v) => { Object.assign(results[i], v, { verified: undefined, verifyNote: undefined, _keep: true }); drawList(); });
+          C.editQuestion(results[i], (v) => { Object.assign(results[i], v, { verified: undefined, verifyNote: undefined, specGuessed: false, _keep: true }); drawList(); });
         });
       };
-      results.forEach((q) => { if (q.verified === false) q._keep = false; });
+      results.forEach((q) => { if (q.verified === false || q.specGuessed) q._keep = false; });
       drawList();
       U.$('[data-toggle-all]', resEl).onclick = () => { const on = results.some((q) => q._keep === false); results.forEach((q) => { q._keep = on; }); drawList(); };
       U.$('[data-save]', resEl).onclick = () => {
-        const keep = results.filter((q) => q._keep !== false).map((q) => { const c = Object.assign({}, q); delete c._keep; c.source = source; return c; });
+        const keep = results.filter((q) => q._keep !== false).map((q) => { const c = Object.assign({}, q); delete c._keep; delete c.specGuessed; c.source = source; return c; });
         if (!keep.length) return U.toast('Nothing ticked');
         Store.addCustom(keep);
         if (after) return after(keep);
@@ -253,7 +254,7 @@
           const fallbackSpec = Courses.points(mod)[0].key;
           const extra = { source: 'import', model: AI.config().model, createdAt: Date.now() };
           qs = (esat ? AI.parseQuestions(reply, { module: mod, extra }) : AI.parseWrittenQuestions(reply, { module: mod, extra }))
-            .map((q) => (q.spec ? q : Object.assign(q, { module: mod, spec: fallbackSpec, verified: false, verifyNote: "The model didn't say which spec point this tests, so it was tagged with the unit's first point – check the tag (✎) before saving." })));
+            .map((q) => (q.spec ? q : Object.assign(q, { module: mod, spec: fallbackSpec, specGuessed: true })));
           qs.forEach((q) => { if (q.type === 'written' && q.marksStated && q.marksStated !== q.marks && q.verified !== false) { q.verified = false; q.verifyNote = `The mark scheme adds up to ${q.marks}, but the question says ${q.marksStated} marks – check the scheme before saving.`; } });
           log(`✓ found ${qs.length} question(s)`);
         } catch (e) { log('✗ ' + e.message); U.toast(e.message, 'bad'); }

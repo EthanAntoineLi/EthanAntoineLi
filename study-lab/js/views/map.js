@@ -9,7 +9,10 @@
   ];
   const UNIT_STATUS = { current: 'Studying now', done: 'Done', later: 'Later' };
 
-  function unitSummary(unitId, status, stats) {
+  // all = Bank.stats(): spec buckets for which points were tried; the unit's score comes from its own bucket,
+  // so an answer that tests several spec points still counts once
+  function unitSummary(unitId, status, all) {
+    const stats = all.spec;
     const pts = Courses.points(unitId);
     const c = { total: pts.length, learned: 0, learning: 0, shaky: 0, none: 0, tried: 0, right: 0, n: 0 };
     for (const p of pts) {
@@ -18,7 +21,7 @@
       const st = stats[p.key];
       if (st) { c.tried++; c.right += st.right; c.n += st.n; }
     }
-    c.acc = c.n ? c.right / c.n : null;
+    c.acc = all.module[unitId] ? all.module[unitId].acc : null;
     return c;
   }
 
@@ -41,11 +44,12 @@
     const myUnits = course.units.filter((u) => Store.unitStatus(u.id)).sort((a, b) => order[Store.unitStatus(a.id)] - order[Store.unitStatus(b.id)]);
     const unitId = params.unit && myUnits.find((u) => u.id === params.unit) ? params.unit : (myUnits[0] && myUnits[0].id);
     const status = Store.specStatus();
-    const stats = Bank.stats().spec;
+    const allStats = Bank.stats();
+    const stats = allStats.spec;
     const counts = Bank.countBySpec();
     const showWeak = params.weak === '1';
 
-    const all = myUnits.map((u) => unitSummary(u.id, status, stats));
+    const all = myUnits.map((u) => unitSummary(u.id, status, allStats));
     const tot = all.reduce((a, c) => ({ total: a.total + c.total, learned: a.learned + c.learned, learning: a.learning + c.learning, shaky: a.shaky + c.shaky, none: a.none + c.none }), { total: 0, learned: 0, learning: 0, shaky: 0, none: 0 });
 
     el.innerHTML = `<div class="page">
@@ -125,8 +129,8 @@
     return `<span class="score-big" style="font-size:1.6rem">${tot.total ? Math.round(100 * tot.learned / tot.total) : 0}%</span><span class="muted">learned<br>${tot.learned}/${tot.total} spec points</span>`;
   }
   function courseTotals() {
-    const status = Store.specStatus(), stats = Bank.stats().spec;
-    return U.$$('[data-unitcard]').map((card) => unitSummary(card.dataset.unitcard, status, stats))
+    const status = Store.specStatus(), all = Bank.stats();
+    return U.$$('[data-unitcard]').map((card) => unitSummary(card.dataset.unitcard, status, all))
       .reduce((a, c) => ({ total: a.total + c.total, learned: a.learned + c.learned, learning: a.learning + c.learning, shaky: a.shaky + c.shaky, none: a.none + c.none }), { total: 0, learned: 0, learning: 0, shaky: 0, none: 0 });
   }
 
@@ -142,7 +146,7 @@
   function refreshBars(unit) {
     const card = U.$(`[data-unitcard="${unit.id}"]`);
     if (!card) return;
-    card.outerHTML = unitCardHTML(unit, unitSummary(unit.id, Store.specStatus(), Bank.stats().spec), true, unit.course);
+    card.outerHTML = unitCardHTML(unit, unitSummary(unit.id, Store.specStatus(), Bank.stats()), true, unit.course);
     const tot = courseTotals();
     const t = U.$('[data-coursetot]'), bar = U.$('[data-coursebar]');
     if (t) t.innerHTML = courseTotHTML(tot);
