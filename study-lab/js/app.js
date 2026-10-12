@@ -40,6 +40,7 @@
     const view = U.$('#view');
     view.innerHTML = '';
     view.scrollTop = 0; window.scrollTo(0, 0);
+    App.prevHash = App.lastHash;
     App.lastHash = location.hash;
     try {
       const r = window.Views[name].render(view, { parts, params });
@@ -56,6 +57,7 @@
 
   window.addEventListener('hashchange', route);
   window.addEventListener('DOMContentLoaded', () => {
+    Store.migrate();
     App.applyTheme();
     if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', App.applyTheme);
     route();

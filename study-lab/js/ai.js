@@ -653,12 +653,29 @@ ${q.solution}
 
   // Models format blocks loosely: bold or heading labels, numbered separators, Windows newlines. Make them uniform.
   function normaliseBlocks(text) {
-    return A.clean(text).replace(/```[a-z]*\n?/g, '').replace(/\r\n?/g, '\n')
-      .replace(/===\s*QUESTION\s*\d*\s*===/gi, '=== QUESTION ===')
-      // field labels only: "**STEM:**", "**STEM**:", "## STEM:", "> STEM:" – not bold content such as "**Answer: C**"
-      .replace(/^[ \t>#]*(\*\*|__)(SPEC|MARKS|DIFFICULTY|STEM|MARK SCHEME|SOLUTION|OPTIONS|ANSWER)[ \t]*(?:\1[ \t]*:|:[ \t]*\1)/gim, '$2:')
-      .replace(/^[ \t>#]*(SPEC|MARKS|DIFFICULTY|STEM|MARK SCHEME|SOLUTION|OPTIONS|ANSWER)[ \t]*:/gim, '$1:')
-      .replace(/^[ \t]*#{1,6}[ \t]*(STEM|MARK SCHEME|SOLUTION|OPTIONS)[ \t]*$/gim, '$1:');
+    text = A.clean(text).replace(/```[a-z]*\n?/g, '').replace(/\r\n?/g, '\n')
+      .replace(/===\s*QUESTION\s*\d*\s*===/gi, '=== QUESTION ===');
+    const LABELS = 'SPEC|MARKS|DIFFICULTY|STEM|MARK SCHEME|SOLUTION|OPTIONS|ANSWER';
+    const wholeLine = new RegExp(`^[ \\t>#]*([*_]{1,3})[ \\t]*(${LABELS})[ \\t]*:[ \\t]*([^\\n]*?)[ \\t]*\\1[ \\t]*$`, 'i');
+    const emphLabel = new RegExp(`^[ \\t>#]*([*_]{1,3})[ \\t]*(${LABELS})[ \\t]*(?:\\1[ \\t]*:|:[ \\t]*\\1)`, 'i');
+    const plainLabel = new RegExp(`^[ \\t>#]*(${LABELS})[ \\t]*:`, 'i');
+    const headingOnly = /^[ \t]*#{1,6}[ \t]*(STEM|MARK SCHEME|SOLUTION|OPTIONS)[ \t]*$/i;
+    let inSolution = false; // the worked solution is content: leave its lines (e.g. "**Answer: C**") exactly as written
+    return text.split('\n').map((line) => {
+      if (/===\s*(QUESTION|END)\s*===/i.test(line)) { inSolution = false; return line; }
+      if (inSolution) return line;
+      let m, out = line;
+      if ((m = wholeLine.exec(line))) {
+        // a whole emphasised field line: "**SPEC: fp3:1.2**", "*STEM:*", "**ANSWER: C**"
+        const L = m[2].toUpperCase(), val = m[3];
+        if (['STEM', 'MARK SCHEME', 'SOLUTION', 'OPTIONS'].includes(L)) out = val ? line : L + ':';
+        else if (L !== 'ANSWER' || /^\(?[A-H]\)?\.?$/i.test(val)) out = L + ': ' + val;
+      } else if ((m = emphLabel.exec(line))) out = m[2] + ':' + line.slice(m[0].length); // "**STEM:**", "**STEM**:"
+      else if ((m = plainLabel.exec(line))) out = m[1] + ':' + line.slice(m[0].length); // "## STEM:", "> STEM:"
+      else if ((m = headingOnly.exec(line))) out = m[1] + ':'; // "### STEM"
+      if (/^SOLUTION\s*:/i.test(out)) inSolution = true;
+      return out;
+    }).join('\n');
   }
   /* Spec keys from a SPEC line, however the model wrote them: "fp3:1.2", "FP3 1.2", "fp3:1.1, fp3:1.2",
      "Unit 4 6.1", or a bare "1.2" for the unit being written for. Keys of that unit come first. */
@@ -671,17 +688,19 @@ ${q.solution}
     for (const c of Courses.all().filter((x) => x !== course).concat(course ? [course] : [])) {
       for (const u of c.units) for (const p of Courses.points(u.id)) labels[Courses.label(p.key).toLowerCase()] = p.key;
     }
-    const shorts = new Set(Courses.all().flatMap((c) => c.units.map((u) => u.short.toLowerCase())));
+    const esatModule = course ? course.kind === 'esat' : null;
+    const sameKind = (k) => esatModule == null || (Bank.specInfo(k).course.kind === 'esat') === esatModule;
     const codes = Object.fromEntries((module ? Courses.points(module) : []).map((p) => [p.code.toLowerCase(), p.key]));
     const keys = [];
     toks.forEach((t, i) => {
       const two = t + ' ' + (toks[i + 1] || ''), three = two + ' ' + (toks[i + 2] || '');
-      // a bare code belongs to this unit unless it follows a unit name ("M1 2.1" is M1's 2.1, handled at "m1")
-      const afterUnit = shorts.has(toks[i - 1] || '') || shorts.has((toks[i - 2] || '') + ' ' + (toks[i - 1] || ''));
+      // a bare code belongs to this unit unless it completes another unit's label ("M1 2.1" is M1's 2.1, found at "m1")
+      const afterUnit = !!(labels[(toks[i - 1] || '') + ' ' + t] || labels[(toks[i - 2] || '') + ' ' + (toks[i - 1] || '') + ' ' + t]);
       // exact key as written, or with the unit id lower-cased ("PHY3:3A.1"), or an ESAT code in any case ("m2.3")
       const o = orig[i], colon = o.indexOf(':');
-      const direct = [o, colon > 0 ? o.slice(0, colon).toLowerCase() + o.slice(colon) : null, o.toUpperCase()].find((x) => x && Bank.specInfo(x));
-      const k = direct || labels[two] || labels[three] || (!afterUnit && codes[t]);
+      const direct = [o, colon > 0 ? o.slice(0, colon).toLowerCase() + o.slice(colon) : null, o.toUpperCase()].find((x) => x && Bank.specInfo(x) && sameKind(x));
+      const lab = [labels[two], labels[three]].find((x) => x && sameKind(x));
+      const k = direct || lab || (!afterUnit && codes[t]);
       if (k && !keys.includes(k)) keys.push(k);
     });
     return keys.filter((k) => Bank.specInfo(k).module === module).concat(keys.filter((k) => Bank.specInfo(k).module !== module));
@@ -702,8 +721,8 @@ ${q.solution}
       };
       const keys = resolveSpecs(grab('SPEC', ['MARKS', 'DIFFICULTY', 'STEM']), defaults.module);
       const spec = keys[0] || '';
-      const marksGiven = parseInt(grab('MARKS', ['DIFFICULTY', 'STEM']), 10);
-      const difficulty = parseInt(grab('DIFFICULTY', ['STEM']), 10) || 2;
+      const marksGiven = parseInt(grab('MARKS', ['DIFFICULTY', 'STEM']).replace(/[*_\s]/g, ''), 10);
+      const difficulty = parseInt(grab('DIFFICULTY', ['STEM']).replace(/[*_\s]/g, ''), 10) || 2;
       const stem = grab('STEM', ['MARK SCHEME']);
       const markScheme = grab('MARK SCHEME', ['SOLUTION']);
       const solution = grab('SOLUTION', ['=== END']);
@@ -761,7 +780,7 @@ ${q.solution}
       };
       const keys = resolveSpecs(grab('SPEC', ['DIFFICULTY', 'STEM']), defaults.module);
       const spec = keys[0] || '';
-      const difficulty = parseInt(grab('DIFFICULTY', ['STEM']), 10) || 2;
+      const difficulty = parseInt(grab('DIFFICULTY', ['STEM']).replace(/[*_\s]/g, ''), 10) || 2;
       const stem = grab('STEM', ['OPTIONS']);
       const optBlock = grab('OPTIONS', ['ANSWER']);
       const answer = grab('ANSWER', ['SOLUTION']).replace(/[^A-Za-z]/g, '').slice(0, 1).toUpperCase();

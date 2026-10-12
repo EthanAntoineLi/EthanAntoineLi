@@ -22,9 +22,9 @@
     const prev = Store.active();
     const prevDone = prev && !prev.finished ? Object.keys(prev.answers || {}).length + Object.values(prev.written || {}).filter((t) => String(t || '').trim()).length : 0;
     if (prevDone && !(await U.confirm('Discard your unfinished session?', `"${prev.title}" isn't finished (${prevDone}/${prev.qids.length} answered). Starting a new set discards it – or cancel and resume it from the dashboard.`, 'Discard and start', true))) {
-      // started from a link: there may be no page to go back to (new tab, bookmark), so go to the dashboard,
-      // where the unfinished session can be resumed
-      if (cfg.replaceHistory) location.replace('#/');
+      // started from a link: go back to the page you came from – or, in a new tab or from a bookmark, to the
+      // dashboard, where the unfinished session can be resumed
+      if (cfg.replaceHistory) location.replace(App.prevHash && App.prevHash !== location.hash ? App.prevHash : '#/');
       return false;
     }
     const mode = cfg.mode || 'relaxed';
@@ -120,8 +120,11 @@
     const isW = (q) => q.type === 'written';
     const answered = (q) => (isW(q) ? !!((s.written[q.id] || '').trim() || (photos[q.id] || []).length) : s.answers[q.id] != null);
     const boardImage = () => (board && !board.isEmpty() ? board.toDataURL() : null);
-    // what gets marked: your photos, plus the scratchpad unless you unticked 'include my scratchpad'
-    const answerImages = (q) => (photos[q.id] || []).concat(!(s.noBoard || {})[q.id] && boardImage() ? [boardImage()] : []);
+    // the scratchpad is shared by the whole set, so keep a picture of it for each written question it was used on
+    // (updated after every stroke made while that question was showing)
+    const boardShots = photoStore[s.id + ':board'] || (photoStore[s.id + ':board'] = {});
+    // what gets marked: your photos, plus that question's scratchpad unless you unticked 'include my scratchpad'
+    const answerImages = (q) => (photos[q.id] || []).concat(!(s.noBoard || {})[q.id] && boardShots[q.id] ? [boardShots[q.id]] : []);
 
     /* ---------------- rendering ---------------- */
     function renderQuestion() {
@@ -295,6 +298,11 @@
       if (tab === 'board' && !board) {
         paneBoard.innerHTML = '<div class="drawer-head"><h3>Scratchpad</h3><span class="muted" style="font-size:12px">your working – can be sent for marking</span><button class="btn ghost sm" data-side-close>✕</button></div><div style="flex:1;min-height:0" data-wb></div>';
         board = Whiteboard.create(U.$('[data-wb]', paneBoard));
+        board.onChange(() => {
+          const q = cur();
+          if (s.finished || showingReview || !q || !isW(q)) return;
+          boardShots[q.id] = board.isEmpty() ? null : board.toDataURL();
+        });
       }
       if (tab === 'tutor') openTutor(false);
     }

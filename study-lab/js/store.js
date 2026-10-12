@@ -19,6 +19,45 @@
     if (key in mem) return mem[key];
     try { const raw = localStorage.getItem(P + key); return raw != null ? JSON.parse(raw) : null; } catch (e) { return null; }
   }
+  const normId = (x) => String(x).toLowerCase().replace(/[^a-z0-9_-]/g, '');
+  /* Units of your own courses always carry the course id ("custom-…-paper1"). Data saved by earlier versions used
+     the plain id ("paper1"; prefixed only when it clashed). Rename those units – and everything keyed by them –
+     once. d is a whole data set: this browser's, or a backup before it is imported. Returns true if it changed. */
+  function migrateIds(d) {
+    const courses = d.customCourses;
+    if (!Array.isArray(courses) || !courses.some((c) => (c.units || []).some((u) => !normId(u.id).startsWith(c.id + '-')))) return false;
+    // the ids the earlier version handed out: ESAT, then built-in courses, then your courses in order
+    const taken = new Set((window.ESAT_SPEC || []).map((m) => m.id));
+    const ov = d.courseOverrides || {};
+    for (const c of window.STUDY_COURSES || []) for (const u of (ov[c.id] || c).units || []) { let id = normId(u.id); if (taken.has(id)) id = c.id + '-' + id; taken.add(id); }
+    const ren = {}, own = {};
+    for (const c of courses) {
+      own[c.id] = {};
+      for (const u of c.units || []) {
+        const orig = normId(u.id);
+        const now = orig.startsWith(c.id + '-') ? orig : c.id + '-' + orig;
+        const was = orig.startsWith(c.id + '-') || !taken.has(orig) ? orig : c.id + '-' + orig;
+        taken.add(was);
+        if (was !== now) ren[was] = now;
+        own[c.id][orig] = now;
+        u.id = now;
+      }
+    }
+    for (const c of courses) for (const u of c.units || []) u.prereqs = (u.prereqs || []).map((p) => own[c.id][normId(p)] || ren[normId(p)] || p);
+    const unit = (id) => ren[id] || id;
+    const key = (k) => { const i = String(k).indexOf(':'); return i < 0 ? k : unit(k.slice(0, i)) + k.slice(i); };
+    const rekey = (obj, fn) => Object.fromEntries(Object.entries(obj).map(([k, v]) => [fn(k), v]));
+    if (d.profile && d.profile.units) d.profile.units = rekey(d.profile.units, unit);
+    if (d.specStatus) d.specStatus = rekey(d.specStatus, key);
+    if (d.cutoffs) d.cutoffs = rekey(d.cutoffs, unit);
+    (d.attempts || []).forEach((a) => { if (a.module) a.module = unit(a.module); if (a.spec) a.spec = key(a.spec); });
+    const fixQ = (q) => { if (!q) return; if (q.module) q.module = unit(q.module); if (q.spec) q.spec = key(q.spec); if (Array.isArray(q.specs)) q.specs = q.specs.map(key); };
+    (d.custom || []).forEach(fixQ);
+    Object.values(d.edits || {}).forEach(fixQ);
+    return true;
+  }
+  const MIGRATE_KEYS = ['customCourses', 'courseOverrides', 'profile', 'specStatus', 'cutoffs', 'attempts', 'custom', 'edits'];
+
   // the spec points an attempt counts towards: its question's main point and any others it also tests
   function specsOf(a) {
     const q = window.Bank && Bank.byId(a.qid);
@@ -102,11 +141,10 @@
     /* Your own courses, and edited copies of built-in ones */
     customCourses() { return load('customCourses', []); },
     saveCustomCourse(c) {
-      // give clashing unit ids a course prefix now and store them, so they never shift when other courses change
-      const others = new Set(Courses.all().filter((x) => x.id !== c.id).flatMap((x) => x.units.map((u) => u.id)));
-      const ren = {};
-      c.units.forEach((u) => { if (others.has(u.id)) { ren[u.id] = c.id + '-' + u.id; u.id = ren[u.id]; } });
-      c.units.forEach((u) => { u.prereqs = (u.prereqs || []).map((p) => ren[p] || p); });
+      // store the unit ids exactly as they're used (course id + unit), so they never shift when other courses change
+      const own = {};
+      c.units.forEach((u) => { const id = normId(u.id); own[id] = id.startsWith(c.id + '-') ? id : c.id + '-' + id; u.id = own[id]; });
+      c.units.forEach((u) => { u.prereqs = (u.prereqs || []).map((p) => own[normId(p)] || p); });
       const list = S.customCourses();
       const i = list.findIndex((x) => x.id === c.id);
       if (i >= 0) list[i] = c; else list.push(c);
@@ -114,7 +152,24 @@
     },
     deleteCustomCourse(id) { save('customCourses', S.customCourses().filter((x) => x.id !== id)); Courses.invalidate(); },
     courseOverrides() { return load('courseOverrides', {}); },
-    saveCourseOverride(id, c) { const o = S.courseOverrides(); if (c) o[id] = c; else delete o[id]; save('courseOverrides', o); Courses.invalidate(); },
+    saveCourseOverride(id, c) {
+      if (c) {
+        // a unit you added to a built-in list mustn't take another course's unit id (and its progress)
+        const others = new Set(Courses.all().filter((x) => x.id !== id).flatMap((x) => x.units.map((u) => u.id)));
+        const ren = {};
+        c.units.forEach((u) => { if (others.has(u.id)) { ren[u.id] = id + '-' + u.id; u.id = ren[u.id]; } });
+        c.units.forEach((u) => { u.prereqs = (u.prereqs || []).map((p) => ren[p] || p); });
+      }
+      const o = S.courseOverrides(); if (c) o[id] = c; else delete o[id]; save('courseOverrides', o); Courses.invalidate();
+    },
+    // bring data from earlier versions up to date (run once at start-up)
+    migrate() {
+      const d = {};
+      for (const k of MIGRATE_KEYS) d[k] = peek(k);
+      if (!migrateIds(d)) return;
+      for (const k of MIGRATE_KEYS) if (d[k] != null) save(k, d[k]);
+      if (window.Courses) Courses.invalidate();
+    },
 
     settings() {
       const s = load('settings', null) || {};
@@ -193,8 +248,8 @@
 
     /* ---- custom questions (AI-made / imported / your own) ---- */
     custom() { return load('custom', []); },
-    // (saving the same preview twice – e.g. after cancelling a prompt – doesn't add duplicates)
-    addCustom(qs) { const list = S.custom(); const ids = new Set(list.map((q) => q.id)); list.push(...qs.filter((q) => !ids.has(q.id))); save('custom', list); Bank.invalidate(); },
+    // saving the same question again (e.g. after editing it in a preview) replaces it rather than duplicating it
+    addCustom(qs) { const m = new Map(S.custom().map((q) => [q.id, q])); qs.forEach((q) => m.set(q.id, q)); save('custom', [...m.values()]); Bank.invalidate(); },
     updateCustom(q) { save('custom', S.custom().map((x) => x.id === q.id ? q : x)); Bank.invalidate(); },
     deleteCustom(id) { save('custom', S.custom().filter((x) => x.id !== id)); Bank.invalidate(); },
 
@@ -231,6 +286,9 @@
     },
     importAll(data, mode = 'replace') {
       if (!data || data.app !== 'esat-practice') throw new Error('That file is not a Study Lab backup.');
+      // a backup from an earlier version: update its ids in its own context, before merging it with this browser's
+      data = JSON.parse(JSON.stringify(data));
+      migrateIds(data);
       const byId = (here, inc) => { const ids = new Set(here.map((x) => x.id)); return here.concat(inc.filter((x) => !ids.has(x.id))); };
       for (const k of S.KEYS) {
         if (!(k in data) || data[k] == null) continue;

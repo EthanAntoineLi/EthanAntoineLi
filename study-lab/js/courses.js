@@ -158,7 +158,10 @@
           if (t) return t.id;
           const o = old.find((x) => norm(x.short) === norm(p)); // renamed unit: same id, new short
           if (o && course.units.some((x) => x.id === o.id)) return o.id;
-          return p.toLowerCase().replace(/[^a-z0-9_-]+/g, '');
+          // a unit of another course: by id, by your-course id ("custom-…-pure1"), then by its short name
+          const ext = C.all().filter((c) => c.id !== base.id).flatMap((c) => c.units);
+          const e = ext.find((x) => x.id === p.toLowerCase()) || ext.find((x) => x.id.endsWith('-' + norm(p))) || ext.find((x) => norm(x.short) === norm(p));
+          return e ? e.id : p.toLowerCase().replace(/[^a-z0-9_-]+/g, '');
         }).filter((p) => p && p !== u.id))];
       });
       return course;
